@@ -1,3 +1,4 @@
+import base64
 import io
 import json
 import os
@@ -11,7 +12,7 @@ import pandas as pd
 import plotly.graph_objects as go
 import streamlit as st
 from PIL import Image
-from scipy.ndimage import gaussian_filter, map_coordinates
+from scipy.ndimage import gaussian_filter, map_coordinates, zoom
 from scipy.spatial import cKDTree
 from shapely.geometry import shape
 
@@ -30,10 +31,6 @@ st.markdown(
         border: 1px solid #1f2937;
         padding: 12px 16px;
         border-radius: 8px;
-    }}
-    /* Permite que el pellizco con dos dedos vaya directo al mapa 3D */
-    .js-plotly-plot .gl-container, .js-plotly-plot canvas {{
-        touch-action: none !important;
     }}
     </style>
     """,
@@ -60,6 +57,13 @@ LON0, LAT0 = -72.0, 2.5
 
 MODO_TEMP = "Temperatura Media (°C)"
 MODO_ANOM = "Anomalía vs. promedio del año (°C)"
+
+VISTA_MAPA = "🗺️ Mapa móvil (pellizco y arrastre)"
+VISTA_3D = "🏔️ Vista 3D (rotar)"
+
+# True = mapa con MapLibre (plotly >= 5.24). Si el mapa móvil sale en blanco,
+# prueba cambiando a False (usa el motor Mapbox clásico).
+USAR_MAPLIBRE = hasattr(go, "Scattermap")
 
 MESES = [
     "Ene", "Feb", "Mar", "Abr", "May", "Jun",
@@ -189,6 +193,39 @@ def puntos_dentro(geojson, lon, lat):
     ).reshape(lon.shape)
 
 
+def _hex(c):
+  return np.array([int(c[i : i + 2], 16) for i in (1, 3, 5)], dtype=float)
+
+
+def colorear(valores):
+  """Valor -> RGB (0-255) con la misma paleta que el 3D (sin matplotlib)."""
+  if modo_mapa == MODO_TEMP:
+    xs = np.array([t for t, _ in PARADAS_TEMP], dtype=float)
+    cols = np.stack([_hex(c) for _, c in PARADAS_TEMP])
+    if bandas_discretas:
+      idx = np.clip(np.digitize(valores, xs) - 1, 0, len(xs) - 1)
+      return cols[idx]
+  else:
+    xs = np.array([p for p, _ in ESCALA_ANOM]) * 2 * ANOM_LIM - ANOM_LIM
+    cols = np.stack([_hex(c) for _, c in ESCALA_ANOM])
+  return np.stack(
+      [np.interp(valores, xs, cols[:, k]) for k in range(3)], axis=-1
+  )
+
+
+def hillshade(elev, dx, dy, exag_v, az=315.0, alt=38.0):
+  """Sombreado de relieve: luz desde el noroeste (convención cartográfica)."""
+  gy, gx = np.gradient(elev * exag_v, dy, dx)
+  nz = 1.0 / np.sqrt(gx**2 + gy**2 + 1.0)
+  nx, ny = -gx * nz, -gy * nz
+  a, h = np.radians(az), np.radians(alt)
+  return np.clip(
+      nx * np.sin(a) * np.cos(h) + ny * np.cos(a) * np.cos(h) + nz * np.sin(h),
+      0,
+      1,
+  )
+
+
 # ----------------------------------------------------------------------------
 # CARTOGRAFÍA
 # ----------------------------------------------------------------------------
@@ -275,8 +312,8 @@ def cargar_cartografia():
 # ----------------------------------------------------------------------------
 # RELIEVE (DEM)
 # ----------------------------------------------------------------------------
-def descargar_dem(lons, lats, zoom=6):
-  n = 2**zoom
+def descargar_dem(lons, lats, zoom_t=6):
+  n = 2**zoom_t
   fx = (lons + 180.0) / 360.0 * n
   fy = (1.0 - np.arcsinh(np.tan(np.radians(lats))) / np.pi) / 2.0 * n
   x0, x1 = int(np.floor(fx.min())), int(np.floor(fx.max()))
@@ -287,7 +324,7 @@ def descargar_dem(lons, lats, zoom=6):
     for tx in range(x0, x1 + 1):
       url = (
           "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/"
-          f"{zoom}/{tx}/{ty}.png"
+          f"{zoom_t}/{tx}/{ty}.png"
       )
       req = urllib.request.Request(
           url, headers={"User-Agent": "geoportal-termico/1.0"}
@@ -585,8 +622,8 @@ else:
       " `FechaObservacion`), mostrando promedio general."
   )
 
-st.sidebar.header("🎛️ Controles Topográficos 3D")
-exag = st.sidebar.slider("Exageración vertical (×):", 2, 30, 12, step=1)
+st.sidebar.header("🎛️ Controles del mapa")
+exag = st.sidebar.slider("Exageración vertical / sombreado (×):", 2, 30, 12, step=1)
 suavizado = st.sidebar.slider("Suavizado espacial:", 0.0, 1.5, 0.30, step=0.05)
 bandas_discretas = st.sidebar.checkbox(
     "Bandas térmicas definidas (isotermas)", value=True
@@ -595,7 +632,7 @@ mostrar_deptos = st.sidebar.checkbox(
     "Líneas departamentales sobre relieve", value=True
 )
 mostrar_vecinos = st.sidebar.checkbox(
-    "Relieve 3D de países aledaños", value=True
+    "Relieve 3D de países aledaños (solo vista 3D)", value=True
 )
 mostrar_ciudades = st.sidebar.checkbox("Etiquetas de capitales", value=True)
 
@@ -634,8 +671,51 @@ def mascara_filtrada(temp):
   return m
 
 
+def escala_actual():
+  """(colorscale, cmin, cmax, título de la barra) según el modo elegido."""
+  if modo_mapa == MODO_TEMP:
+    if bandas_discretas:
+      escala = []
+      for idx_p in range(len(PARADAS_TEMP) - 1):
+        v0, c0 = PARADAS_TEMP[idx_p]
+        v1, _ = PARADAS_TEMP[idx_p + 1]
+        p0 = (v0 - T_MIN) / (T_MAX - T_MIN)
+        p1 = (v1 - T_MIN) / (T_MAX - T_MIN)
+        escala.extend([[p0, c0], [max(p0, p1 - 0.002), c0]])
+      escala.append([1.0, PARADAS_TEMP[-1][1]])
+    else:
+      escala = ESCALA_TEMP
+    return escala, T_MIN, T_MAX, "Temp (°C)"
+  return ESCALA_ANOM, -ANOM_LIM, ANOM_LIM, "Anomalía (°C)"
+
+
+def lineas_lonlat():
+  """Líneas departamentales (o contorno del país) como arreglos con NaN."""
+  if mostrar_deptos and deptos_geojson is not None:
+    polys = []
+    for feat in deptos_geojson["features"]:
+      g = feat["geometry"]
+      if g["type"] == "Polygon":
+        polys.append(g["coordinates"])
+      elif g["type"] == "MultiPolygon":
+        polys.extend(g["coordinates"])
+  else:
+    polys = geojson_col["coordinates"]
+
+  lx, ly = [], []
+  for poly in polys:
+    for ring in poly:
+      arr = np.asarray(ring, dtype=float)[:, :2]
+      arr = arr[:: max(1, len(arr) // 1200)]
+      lx += [arr[:, 0], [np.nan]]
+      ly += [arr[:, 1], [np.nan]]
+  if not lx:
+    return None, None
+  return np.concatenate(lx), np.concatenate(ly)
+
+
 # ----------------------------------------------------------------------------
-# FIGURA 3D CON NAVEGACIÓN TÁCTIL Y ZOOM MEJORADO
+# FIGURA 3D
 # ----------------------------------------------------------------------------
 def construir_figura(
     valores, mascara_activa, modo_tactil, vista_rapida, zoom_nivel=1.0
@@ -651,7 +731,7 @@ def construir_figura(
     mascara_fondo = base["mascara_vec"] | base["mascara_col"]
     fig.add_trace(
         go.Surface(
-            x=X, y=Y, z=np.where(mascara_fondo, Z - 0.15, np.nan),
+            x=X, y=Y, z=np.where(mascara_fondo, Z - 0.05 * exag, np.nan),
             surfacecolor=elev,
             colorscale=[
                 [0.0, "#141b2b"], [0.45, "#2b3649"],
@@ -662,23 +742,7 @@ def construir_figura(
         )
     )
 
-  if modo_mapa == MODO_TEMP:
-    if bandas_discretas:
-      escala = []
-      for idx_p in range(len(PARADAS_TEMP) - 1):
-        v0, c0 = PARADAS_TEMP[idx_p]
-        v1, _ = PARADAS_TEMP[idx_p + 1]
-        p0 = (v0 - T_MIN) / (T_MAX - T_MIN)
-        p1 = (v1 - T_MIN) / (T_MAX - T_MIN)
-        escala.extend([[p0, c0], [max(p0, p1 - 0.002), c0]])
-      escala.append([1.0, PARADAS_TEMP[-1][1]])
-    else:
-      escala = ESCALA_TEMP
-    cmin, cmax, titulo_barra = T_MIN, T_MAX, "Temp (°C)"
-  else:
-    escala, cmin, cmax, titulo_barra = (
-        ESCALA_ANOM, -ANOM_LIM, ANOM_LIM, "Anomalía (°C)"
-    )
+  escala, cmin, cmax, titulo_barra = escala_actual()
 
   fig.add_trace(
       go.Surface(
@@ -708,26 +772,8 @@ def construir_figura(
     out[ok] = map_coordinates(elev, [fi[ok], fj[ok]], order=1, mode="nearest")
     return out / 1000.0 * exag
 
-  if mostrar_deptos and deptos_geojson is not None:
-    polys = []
-    for feat in deptos_geojson["features"]:
-      g = feat["geometry"]
-      if g["type"] == "Polygon":
-        polys.append(g["coordinates"])
-      elif g["type"] == "MultiPolygon":
-        polys.extend(g["coordinates"])
-  else:
-    polys = geojson_col["coordinates"]
-
-  lx, ly = [], []
-  for poly in polys:
-    for ring in poly:
-      arr = np.asarray(ring, dtype=float)[:, :2]
-      arr = arr[:: max(1, len(arr) // 1200)]
-      lx += [arr[:, 0], [np.nan]]
-      ly += [arr[:, 1], [np.nan]]
-  if lx:
-    lon_l, lat_l = np.concatenate(lx), np.concatenate(ly)
+  lon_l, lat_l = lineas_lonlat()
+  if lon_l is not None:
     xl, yl = a_km(lon_l, lat_l)
     fig.add_trace(
         go.Scatter3d(
@@ -802,6 +848,130 @@ def construir_figura(
   return fig
 
 
+# ----------------------------------------------------------------------------
+# MAPA MÓVIL (raster con hillshade sobre un mapa base con gestos nativos)
+# ----------------------------------------------------------------------------
+def construir_mapa_movil(valores, mascara_activa):
+  lons, lats = base["grid_lon"][0], base["grid_lat"][:, 0]
+  elev_full = base["elev"]
+  n = elev_full.shape[0]
+
+  j0, j1 = np.searchsorted(lons, [-79.5, -66.5])
+  i0, i1 = np.searchsorted(lats, [-4.5, 13.0])
+  sl = (slice(i0, i1), slice(j0, j1))
+  F = 3
+
+  elev = np.clip(zoom(elev_full[sl], F, order=3), 0, None)
+  val = zoom(valores[sl], F, order=1)
+  alfa = np.clip(
+      (zoom(mascara_activa[sl].astype(float), F, order=1) - 0.3) / 0.4, 0, 1
+  )
+  dx = (lons[1] - lons[0]) * KM_GRADO * 1000 / F
+  dy = (lats[1] - lats[0]) * KM_GRADO * 1000 / F
+  sombra = hillshade(elev, dx, dy, max(2.0, exag * 0.5))
+  rgb = colorear(val) * (0.15 + 1.25 * sombra)[..., None]
+  rgba = np.dstack([np.clip(rgb, 0, 255), alfa * 235]).astype(np.uint8)[::-1]
+
+  buf = io.BytesIO()
+  Image.fromarray(rgba).save(buf, format="PNG")
+  uri = "data:image/png;base64," + base64.b64encode(buf.getvalue()).decode()
+  esquinas = [
+      [float(lons[j0]), float(lats[i1 - 1])],
+      [float(lons[j1 - 1]), float(lats[i1 - 1])],
+      [float(lons[j1 - 1]), float(lats[i0])],
+      [float(lons[j0]), float(lats[i0])],
+  ]
+
+  Trace = go.Scattermap if USAR_MAPLIBRE else go.Scattermapbox
+  clave = "map" if USAR_MAPLIBRE else "mapbox"
+  escala, cmin, cmax, titulo_barra = escala_actual()
+
+  fig = go.Figure()
+
+  # Puntos invisibles: dan el popup al tocar y la barra de color
+  paso = 4
+  ii, jj = np.meshgrid(
+      np.arange(0, n, paso), np.arange(0, n, paso), indexing="ij"
+  )
+  ok = mascara_activa[ii, jj]
+  ii, jj = ii[ok], jj[ok]
+  pv = valores[ii, jj]
+  fig.add_trace(
+      Trace(
+          lon=base["grid_lon"][ii, jj],
+          lat=base["grid_lat"][ii, jj],
+          mode="markers",
+          marker=dict(
+              size=16, opacity=0, color=pv, colorscale=escala,
+              cmin=cmin, cmax=cmax, showscale=True,
+              colorbar=dict(
+                  title=dict(text=titulo_barra, font=dict(color="white")),
+                  tickfont=dict(color="white"), len=0.45, thickness=12,
+                  x=0.01,
+              ),
+          ),
+          customdata=np.column_stack([pv, elev_full[ii, jj]]),
+          hovertemplate=(
+              "<b>Valor:</b> %{customdata[0]:.1f} °C<br><b>Altitud:</b>"
+              " %{customdata[1]:.0f} m<extra></extra>"
+          ),
+          showlegend=False,
+      )
+  )
+
+  lon_l, lat_l = lineas_lonlat()
+  if lon_l is not None:
+    fig.add_trace(
+        Trace(
+            lon=lon_l, lat=lat_l, mode="lines",
+            line=dict(color="rgba(8,12,24,0.85)", width=1),
+            hoverinfo="skip", showlegend=False,
+        )
+    )
+
+  if mostrar_ciudades:
+    c_lon, c_lat, c_txt = [], [], []
+    for nombre, lat, lon in CIUDADES:
+      i = _idx_grid(np.array(lat), LAT_MIN, LAT_MAX, n)
+      j = _idx_grid(np.array(lon), LON_MIN, LON_MAX, n)
+      if mascara_activa[i, j]:
+        c_lon.append(lon)
+        c_lat.append(lat)
+        c_txt.append(nombre)
+    if c_lon:
+      fig.add_trace(
+          Trace(
+              lon=c_lon, lat=c_lat, mode="markers+text",
+              marker=dict(size=7, color="white"),
+              text=c_txt, textposition="top center",
+              textfont=dict(color="white", size=11),
+              hoverinfo="text", showlegend=False,
+          )
+      )
+
+  fig.update_layout(
+      height=640,
+      margin=dict(l=0, r=0, t=0, b=0),
+      paper_bgcolor=BG,
+      showlegend=False,
+      uirevision="mapa-movil",
+      **{
+          clave: dict(
+              style="carto-darkmatter",
+              center=dict(lat=4.6, lon=-73.3),
+              zoom=4.4,
+              layers=[
+                  dict(
+                      sourcetype="image", source=uri, coordinates=esquinas,
+                      below="traces", opacity=1.0,
+                  )
+              ],
+          )
+      },
+  )
+  return fig
+
+
 def grafico_serie(serie, ini, fin):
   fig = go.Figure(
       go.Scatter(
@@ -843,7 +1013,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
       LightSource, LinearSegmentedColormap, Normalize, to_rgb,
   )
   from matplotlib.patches import Polygon, Rectangle
-  from scipy.ndimage import zoom
 
   lons, lats = base["grid_lon"][0], base["grid_lat"][:, 0]
   lon_w, lon_e = -79.8, -66.2
@@ -1160,25 +1329,56 @@ k2.metric("Temperatura Media", kpi_vals[0][1])
 k3.metric("Rango Térmico (Mín / Máx)", kpi_vals[1][1])
 k4.metric("Territorio en Calor Intenso (≥27°C)", kpi_vals[2][1])
 
-# Barra superior de navegación táctil / mouse + zoom
-c_nav1, c_nav2, c_nav3 = st.columns([2, 1, 1])
-with c_nav1:
-  modo_tactil = st.radio(
-      "Control táctil / mouse:",
-      [
-          "Rotar mapa (Tornamesa)",
-          "Mover / Desplazar",
-          "Bloquear mapa (bajar página)",
-      ],
-      horizontal=True,
+# --- Tipo de vista y controles de navegación ---
+vista = st.radio("Vista:", [VISTA_MAPA, VISTA_3D], horizontal=True)
+
+modo_tactil = "Rotar mapa (Tornamesa)"
+vista_rapida = "Inclinada (3D)"
+zoom_nivel = 1.0
+congelar_mapa = False
+
+if vista == VISTA_3D:
+  c_nav1, c_nav2, c_nav3 = st.columns([2, 1, 1])
+  with c_nav1:
+    modo_tactil = st.radio(
+        "Control táctil / mouse:",
+        [
+            "Rotar mapa (Tornamesa)",
+            "Mover / Desplazar",
+            "Bloquear mapa (bajar página)",
+        ],
+        horizontal=True,
+    )
+  with c_nav2:
+    vista_rapida = st.selectbox("Enfoque rápido:", list(CAMARAS.keys()))
+  with c_nav3:
+    zoom_nivel = st.slider("Zoom:", 0.4, 2.2, 1.0, step=0.1)
+else:
+  st.caption(
+      "Pellizca con dos dedos para acercar, arrastra con uno para moverte"
+      " y toca el mapa para ver temperatura y altitud."
   )
-with c_nav2:
-  vista_rapida = st.selectbox(
-      "Enfoque rápido:",
-      ["Inclinada (3D)", "Desde arriba (2D)", "Cordilleras (Rasante)"],
+  congelar_mapa = st.checkbox(
+      "🔒 Congelar mapa (para bajar la página con el dedo)", value=False
   )
-with c_nav3:
-  zoom_nivel = st.slider("Zoom:", 0.4, 2.2, 1.0, step=0.1)
+
+
+def renderizar(destino, vals, mask, key):
+  if vista == VISTA_3D:
+    fig = construir_figura(vals, mask, modo_tactil, vista_rapida, zoom_nivel)
+    cfg = {"displaylogo": False, "scrollZoom": True}
+    k = f"mapa3d_{key}"
+  else:
+    fig = construir_mapa_movil(vals, mask)
+    cfg = {
+        "displaylogo": False,
+        "scrollZoom": True,
+        "displayModeBar": False,
+        "staticPlot": congelar_mapa,
+    }
+    k = f"mapamovil_{key}"
+  destino.plotly_chart(fig, use_container_width=True, key=k, config=cfg)
+
 
 titulo_ph = st.empty()
 mapa_ph = st.empty()
@@ -1195,29 +1395,13 @@ if reproducir and meses_disponibles is not None:
     titulo_ph.markdown(
         f"### {MESES_LARGO[p.month - 1]} {p.year} · {np.nanmean(t_[m_]):.1f} °C"
     )
-    mapa_ph.plotly_chart(
-        construir_figura(
-            t_ if modo_mapa == MODO_TEMP else a_,
-            m_,
-            modo_tactil,
-            vista_rapida,
-            zoom_nivel,
-        ),
-        use_container_width=True,
-        key=f"anim_{p}",
-        config={"displaylogo": False, "scrollZoom": True},
+    renderizar(
+        mapa_ph, t_ if modo_mapa == MODO_TEMP else a_, m_, f"anim_{p}"
     )
     time.sleep(0.7)
   titulo_ph.empty()
 
-mapa_ph.plotly_chart(
-    construir_figura(
-        valores, mascara_activa, modo_tactil, vista_rapida, zoom_nivel
-    ),
-    use_container_width=True,
-    key="mapa3d",
-    config={"displaylogo": False, "scrollZoom": True},
-)
+renderizar(mapa_ph, valores, mascara_activa, "principal")
 
 serie = serie_mensual(RUTA_CSV, mtime) if tiene_fecha else None
 if serie is not None and len(serie) >= 2:
