@@ -24,6 +24,24 @@ BG = "#0a1226"
 st.markdown(
     f"""
     <style>
+    st.markdown(
+    f"""
+    <style>
+    .stApp {{ background-color: {BG}; color: #f0f2f6; }}
+    [data-testid="stMetric"] {{
+        background-color: #111827;
+        border: 1px solid #1f2937;
+        padding: 12px 16px;
+        border-radius: 8px;
+    }}
+    /* Permite que el pellizco con dos dedos vaya directo al mapa 3D */
+    .js-plotly-plot .gl-container, .js-plotly-plot canvas {{
+        touch-action: none !important;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
     .stApp {{ background-color: {BG}; color: #f0f2f6; }}
     [data-testid="stMetric"] {{
         background-color: #111827;
