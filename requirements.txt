@@ -1,0 +1,10 @@
+streamlit
+pandas
+numpy
+plotly
+scipy
+shapely
+Pillow
+matplotlib
+requests
+urllib3
