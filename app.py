@@ -24,9 +24,6 @@ BG = "#0a1226"
 st.markdown(
     f"""
     <style>
-    st.markdown(
-    f"""
-    <style>
     .stApp {{ background-color: {BG}; color: #f0f2f6; }}
     [data-testid="stMetric"] {{
         background-color: #111827;
@@ -37,17 +34,6 @@ st.markdown(
     /* Permite que el pellizco con dos dedos vaya directo al mapa 3D */
     .js-plotly-plot .gl-container, .js-plotly-plot canvas {{
         touch-action: none !important;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-    .stApp {{ background-color: {BG}; color: #f0f2f6; }}
-    [data-testid="stMetric"] {{
-        background-color: #111827;
-        border: 1px solid #1f2937;
-        padding: 12px 16px;
-        border-radius: 8px;
     }}
     </style>
     """,
@@ -649,9 +635,11 @@ def mascara_filtrada(temp):
 
 
 # ----------------------------------------------------------------------------
-# FIGURA 3D CON NAVEGACIÓN TÁCTIL SIMPLIFICADA
+# FIGURA 3D CON NAVEGACIÓN TÁCTIL Y ZOOM MEJORADO
 # ----------------------------------------------------------------------------
-def construir_figura(valores, mascara_activa, modo_tactil, vista_rapida):
+def construir_figura(
+    valores, mascara_activa, modo_tactil, vista_rapida, zoom_nivel=1.0
+):
   grid_lon, grid_lat, elev = base["grid_lon"], base["grid_lat"], base["elev"]
   n = elev.shape[0]
   X, Y = a_km(grid_lon, grid_lat)
@@ -781,6 +769,17 @@ def construir_figura(valores, mascara_activa, modo_tactil, vista_rapida):
       "Bloquear mapa (bajar página)": False,
   }
 
+  cam_base = CAMARAS[vista_rapida]
+  factor_z = 1.0 / max(zoom_nivel, 0.2)
+  camara_actual = dict(
+      eye=dict(
+          x=cam_base["eye"]["x"] * factor_z,
+          y=cam_base["eye"]["y"] * factor_z,
+          z=cam_base["eye"]["z"] * factor_z,
+      ),
+      center=cam_base["center"],
+  )
+
   x0, y0 = a_km(LON_MIN, LAT_MIN)
   x1, y1 = a_km(LON_MAX, LAT_MAX)
   fig.update_layout(
@@ -789,13 +788,14 @@ def construir_figura(valores, mascara_activa, modo_tactil, vista_rapida):
       paper_bgcolor=BG,
       showlegend=False,
       dragmode=drag_map[modo_tactil],
-      uirevision="mantener_camara",
+      uirevision=f"{vista_rapida}_{zoom_nivel}",
       scene=dict(
+          dragmode=drag_map[modo_tactil],
           xaxis=dict(visible=False, range=[float(x0), float(x1)]),
           yaxis=dict(visible=False, range=[float(y0), float(y1)]),
           zaxis=dict(visible=False, range=[0, 6.2 * exag]),
           aspectmode="data",
-          camera=CAMARAS[vista_rapida],
+          camera=camara_actual,
           bgcolor=BG,
       ),
   )
@@ -1160,8 +1160,8 @@ k2.metric("Temperatura Media", kpi_vals[0][1])
 k3.metric("Rango Térmico (Mín / Máx)", kpi_vals[1][1])
 k4.metric("Territorio en Calor Intenso (≥27°C)", kpi_vals[2][1])
 
-# Barra superior de navegación táctil / mouse
-c_nav1, c_nav2 = st.columns([2, 1])
+# Barra superior de navegación táctil / mouse + zoom
+c_nav1, c_nav2, c_nav3 = st.columns([2, 1, 1])
 with c_nav1:
   modo_tactil = st.radio(
       "Control táctil / mouse:",
@@ -1177,6 +1177,8 @@ with c_nav2:
       "Enfoque rápido:",
       ["Inclinada (3D)", "Desde arriba (2D)", "Cordilleras (Rasante)"],
   )
+with c_nav3:
+  zoom_nivel = st.slider("Zoom:", 0.4, 2.2, 1.0, step=0.1)
 
 titulo_ph = st.empty()
 mapa_ph = st.empty()
@@ -1195,7 +1197,11 @@ if reproducir and meses_disponibles is not None:
     )
     mapa_ph.plotly_chart(
         construir_figura(
-            t_ if modo_mapa == MODO_TEMP else a_, m_, modo_tactil, vista_rapida
+            t_ if modo_mapa == MODO_TEMP else a_,
+            m_,
+            modo_tactil,
+            vista_rapida,
+            zoom_nivel,
         ),
         use_container_width=True,
         key=f"anim_{p}",
@@ -1205,7 +1211,9 @@ if reproducir and meses_disponibles is not None:
   titulo_ph.empty()
 
 mapa_ph.plotly_chart(
-    construir_figura(valores, mascara_activa, modo_tactil, vista_rapida),
+    construir_figura(
+        valores, mascara_activa, modo_tactil, vista_rapida, zoom_nivel
+    ),
     use_container_width=True,
     key="mapa3d",
     config={"displaylogo": False, "scrollZoom": True},
