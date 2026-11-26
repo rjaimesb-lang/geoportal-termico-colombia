@@ -1,6 +1,7 @@
 import io
 import json
 import os
+import ssl
 import time
 import unicodedata
 import urllib.request
@@ -15,7 +16,7 @@ from scipy.spatial import cKDTree
 from shapely.geometry import shape
 
 st.set_page_config(
-    page_title="Geoportal 3D para descarga de mapas - Colombia 2026", layout="wide"
+    page_title="Geoportal Térmico 3D - Colombia 2026", layout="wide"
 )
 
 BG = "#0a1226"
@@ -35,10 +36,10 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.title("Análisis climatológico en Colombia (2026) - Fenómeno del Niño")
+st.title("🌡️ Geoportal de Análisis Térmico y Relieve 3D · Colombia (2026)")
 st.markdown(
     "Fuente de datos: **IDEAM (Datos Abiertos Colombia)** · Relieve: modelo"
-    " digital de elevación real · Interpolación IDW con gradiente altitudinal. Motor topográfico SRTM por Raúl Jaimes"
+    " digital de elevación real · Interpolación IDW con gradiente altitudinal."
 )
 
 # ----------------------------------------------------------------------------
@@ -50,25 +51,26 @@ RESOLUCION = 300
 LON_MIN, LON_MAX = -82.5, -61.5
 LAT_MIN, LAT_MAX = -8.5, 13.8
 
-# Proyección plana simple (km) para que el 3D tenga proporciones reales y la
-# iluminación (hillshade) se calcule bien. Centro aproximado de Colombia.
 KM_GRADO = 111.0
 LON0, LAT0 = -72.0, 2.5
 
 MODO_TEMP = "Temperatura Media (°C)"
 MODO_ANOM = "Anomalía vs. promedio del año (°C)"
 
-MESES = ["Ene", "Feb", "Mar", "Abr", "May", "Jun",
-         "Jul", "Ago", "Sep", "Oct", "Nov", "Dic"]
-MESES_LARGO = ["Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio", "Julio",
-               "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre"]
+MESES = [
+    "Ene", "Feb", "Mar", "Abr", "May", "Jun",
+    "Jul", "Ago", "Sep", "Oct", "Nov", "Dic",
+]
+MESES_LARGO = [
+    "Enero", "Febrero", "Marzo", "Abril", "Mayo", "Junio",
+    "Julio", "Agosto", "Septiembre", "Octubre", "Noviembre", "Diciembre",
+]
 
 NOMBRES_FECHA = {
-    "fecha", "fechaobservacion", "fechaobs", "fechahora", "date",
-    "datetime", "timestamp",
+    "fecha", "fechaobservacion", "fechaobs", "fechahora",
+    "date", "datetime", "timestamp",
 }
 
-# Paleta de temperatura con más gradación en el rango cálido (20-30 °C)
 T_MIN, T_MAX = 4.0, 32.0
 PARADAS_TEMP = [
     (4, "#eef6ff"), (10, "#60a5fa"), (14, "#22d3ee"), (18, "#86efac"),
@@ -82,20 +84,18 @@ ESCALA_ANOM = [
     [0.75, "#fb923c"], [1.0, "#991b1b"],
 ]
 
-# Luz tipo cartográfico (desde el noroeste, baja) para resaltar el relieve
-LUZ = dict(ambient=0.36, diffuse=0.95, specular=0.08, roughness=0.75,
-           fresnel=0.08)
+LUZ = dict(ambient=0.38, diffuse=0.95, specular=0.06, roughness=0.78, fresnel=0.06)
 POS_LUZ = dict(x=-4000, y=4000, z=3000)
 
 CAMARAS = {
-    "Inclinada (recomendada)": dict(
+    "Inclinada (3D)": dict(
         eye=dict(x=0.0, y=-1.05, z=0.95), center=dict(x=0.0, y=0.0, z=-0.05)
     ),
-    "Cenital": dict(
-        eye=dict(x=0.0, y=-0.15, z=1.7), center=dict(x=0.0, y=0.0, z=0.0)
+    "Desde arriba (2D)": dict(
+        eye=dict(x=0.0, y=-0.02, z=1.65), center=dict(x=0.0, y=0.0, z=0.0)
     ),
-    "Rasante": dict(
-        eye=dict(x=0.15, y=-1.5, z=0.45), center=dict(x=0.0, y=0.05, z=-0.05)
+    "Cordilleras (Rasante)": dict(
+        eye=dict(x=0.15, y=-1.45, z=0.45), center=dict(x=0.0, y=0.05, z=-0.05)
     ),
 }
 
@@ -105,8 +105,10 @@ CIUDADES = [
     ("Cali", 3.45, -76.53),
     ("Barranquilla", 10.96, -74.80),
     ("Cartagena", 10.39, -75.48),
+    ("Santa Marta", 11.24, -74.20),
     ("Bucaramanga", 7.12, -73.12),
     ("Cúcuta", 7.89, -72.50),
+    ("Tunja", 5.53, -73.36),
     ("Pereira", 4.81, -75.69),
     ("Ibagué", 4.44, -75.24),
     ("Villavicencio", 4.14, -73.63),
@@ -114,6 +116,7 @@ CIUDADES = [
     ("Arauca", 7.08, -70.76),
     ("San José del Guaviare", 2.57, -72.64),
     ("Montería", 8.75, -75.88),
+    ("Sincelejo", 9.30, -75.39),
     ("Valledupar", 10.46, -73.25),
     ("Riohacha", 11.54, -72.90),
     ("Pasto", 1.21, -77.28),
@@ -145,7 +148,6 @@ REGIONES_NATURALES = {
 # UTILIDADES
 # ----------------------------------------------------------------------------
 def a_km(lon, lat):
-  """Convierte lon/lat a km (plano) respecto al centro de Colombia."""
   return (
       (np.asarray(lon, dtype=float) - LON0) * KM_GRADO,
       (np.asarray(lat, dtype=float) - LAT0) * KM_GRADO,
@@ -168,7 +170,7 @@ def puntos_dentro(geojson, lon, lat):
   if geom.is_empty:
     return np.zeros(lon.shape, dtype=bool)
   try:
-    from shapely import contains_xy  # shapely >= 2.0
+    from shapely import contains_xy
 
     return np.asarray(contains_xy(geom, lon.ravel(), lat.ravel())).reshape(
         lon.shape
@@ -241,14 +243,11 @@ def cargar_cartografia():
   geojson_col = {"type": "MultiPolygon", "coordinates": col_polys}
   geojson_vecinos = {"type": "MultiPolygon", "coordinates": vecinos_polys}
 
-  deptos_geojson = None
   if (
       not os.path.exists("deptos_colombia.json")
       or os.path.getsize("deptos_colombia.json") <= 10000
   ):
     try:
-      import ssl
-
       ctx = ssl._create_unverified_context()
       url_d = "https://gist.githubusercontent.com/john-guerra/43c7656821069d00dcbc/raw/be6a6e239cd5b5b803c6e7c2ec405b793a9064dd/Colombia.geo.json"
       with urllib.request.urlopen(url_d, context=ctx, timeout=20) as r:
@@ -258,6 +257,7 @@ def cargar_cartografia():
     except Exception:
       pass
 
+  deptos_geojson = None
   if (
       os.path.exists("deptos_colombia.json")
       and os.path.getsize("deptos_colombia.json") > 10000
@@ -272,8 +272,6 @@ def cargar_cartografia():
 # RELIEVE (DEM)
 # ----------------------------------------------------------------------------
 def descargar_dem(lons, lats, zoom=6):
-  """Descarga teselas Terrarium (AWS Terrain Tiles, basadas en SRTM) y las
-  remuestrea a la malla lon/lat. Se guarda en disco para no repetir."""
   n = 2**zoom
   fx = (lons + 180.0) / 360.0 * n
   fy = (1.0 - np.arcsinh(np.tan(np.radians(lats))) / np.pi) / 2.0 * n
@@ -300,7 +298,6 @@ def descargar_dem(lons, lats, zoom=6):
           (tx - x0) * 256 : (tx - x0 + 1) * 256,
       ] = elev
 
-  # Promediar píxeles antes de remuestrear (evita picos "aserrados")
   mosaico = gaussian_filter(mosaico, sigma=1.6)
   gx, gy = np.meshgrid((fx - x0) * 256.0, (fy - y0) * 256.0)
   dem = map_coordinates(mosaico, [gy, gx], order=1, mode="nearest")
@@ -318,7 +315,6 @@ def trazar_cadena(grid_lon, grid_lat, x1, y1, x2, y2, ancho, altura):
 
 
 def modelo_relieve_sintetico(grid_lon, grid_lat):
-  """Plan B (sin internet): relieve andino sintético y suave."""
   elev = np.zeros_like(grid_lat)
   cordilleras = [
       (-77.7, 0.9, -76.2, 7.3, 0.42, 2600),
@@ -384,11 +380,13 @@ def cargar_datos(ruta_csv, mtime):
 def estaciones_periodo(df, ini_s, fin_s):
   d = df
   if ini_s is not None:
-    d = d[(d["fecha"] >= pd.Timestamp(ini_s)) & (d["fecha"] <= pd.Timestamp(fin_s))]
+    d = d[
+        (d["fecha"] >= pd.Timestamp(ini_s)) & (d["fecha"] <= pd.Timestamp(fin_s))
+    ]
   return d.groupby(["latitud", "longitud"], as_index=False)["temperatura"].mean()
 
 
-@st.cache_data(show_spinner="Preparando relieve, fronteras y malla (solo la primera vez)…")
+@st.cache_data(show_spinner="Preparando relieve, fronteras y malla…")
 def construir_base(ruta_csv, mtime, resolucion):
   lons = np.linspace(LON_MIN, LON_MAX, resolucion)
   lats = np.linspace(LAT_MIN, LAT_MAX, resolucion)
@@ -411,16 +409,17 @@ def construir_base(ruta_csv, mtime, resolucion):
 
   geojson_col, geojson_vecinos, _ = cargar_cartografia()
   mascara_col = puntos_dentro(geojson_col, grid_lon, grid_lat)
-  mascara_vec = puntos_dentro(geojson_vecinos, grid_lon, grid_lat) & ~mascara_col
+  mascara_vec = puntos_dentro(geojson_vecinos, grid_lon, grid_lat)
 
-  # Departamento de cada celda = el de la estación más cercana
   df = cargar_datos(ruta_csv, mtime)
-  est = df.groupby(["latitud", "longitud"], as_index=False)["departamento"].first()
+  est = df.groupby(["latitud", "longitud"], as_index=False)[
+      "departamento"
+  ].first()
   _, idx = cKDTree(est[["latitud", "longitud"]].values).query(
       np.column_stack([grid_lat.ravel(), grid_lon.ravel()])
   )
-  deptos_grid = est["departamento"].to_numpy(dtype=object)[idx].reshape(
-      grid_lat.shape
+  deptos_grid = (
+      est["departamento"].to_numpy(dtype=object)[idx].reshape(grid_lat.shape)
   )
 
   return dict(
@@ -436,8 +435,6 @@ def construir_base(ruta_csv, mtime, resolucion):
 
 @st.cache_data(show_spinner="Interpolando temperatura del periodo…")
 def interpolar_periodo(ruta_csv, mtime, ini_s, fin_s, resolucion):
-  """IDW sobre los residuos respecto al gradiente altitudinal: la temperatura
-  sigue al relieve (más fría en la cordillera) y se ajusta a las estaciones."""
   df = cargar_datos(ruta_csv, mtime)
   base = construir_base(ruta_csv, mtime, resolucion)
   elev = base["elev"]
@@ -461,19 +458,21 @@ def interpolar_periodo(ruta_csv, mtime, ini_s, fin_s, resolucion):
   lat_e = est["latitud"].to_numpy()
   lon_e = est["longitud"].to_numpy()
   t = est["temperatura"].to_numpy()
-  z_e = elev[
-      _idx_grid(lat_e, LAT_MIN, LAT_MAX, n),
-      _idx_grid(lon_e, LON_MIN, LON_MAX, n),
-  ] / 1000.0
+  z_e = (
+      elev[
+          _idx_grid(lat_e, LAT_MIN, LAT_MAX, n),
+          _idx_grid(lon_e, LON_MIN, LON_MAX, n),
+      ]
+      / 1000.0
+  )
 
-  pend = -6.0  # °C por km, valor típico de la zona andina
+  pend = -6.0
   if len(t) >= 15 and np.ptp(z_e) > 0.5:
     pend = float(np.clip(np.polyfit(z_e, t, 1)[0], -8.0, -4.0))
   t0 = float(np.mean(t - pend * z_e))
   residuo = t - (t0 + pend * z_e)
   temp = t0 + pend * elev / 1000.0 + idw(lat_e, lon_e, residuo)
 
-  # Anomalía = periodo vs. promedio de todo el año en cada estación
   anom = np.zeros(forma)
   if ini_s is not None:
     todas = estaciones_periodo(df, None, None)
@@ -515,7 +514,7 @@ mtime = os.path.getmtime(RUTA_CSV)
 df = cargar_datos(RUTA_CSV, mtime)
 tiene_fecha = bool(df["fecha"].notna().any())
 
-st.sidebar.header("Filtros (2026)")
+st.sidebar.header("🌍 Filtros Ambientales (2026)")
 
 modo_mapa = st.sidebar.radio(
     "Variable climática a analizar:", [MODO_TEMP, MODO_ANOM]
@@ -534,8 +533,7 @@ piso_termico = st.sidebar.selectbox(
     ],
 )
 
-# --- Filtro de fecha ---
-st.sidebar.header("Periodo de análisis")
+st.sidebar.header("📅 Periodo de análisis")
 ini_s, fin_s = None, None
 etiqueta_periodo = "Año completo"
 meses_disponibles = None
@@ -579,16 +577,16 @@ if tiene_fecha:
   reproducir = st.sidebar.button("▶ Reproducir mes a mes")
 else:
   st.sidebar.warning(
-      "Tu CSV no tiene una columna de fecha reconocible (por ejemplo"
-      " `fecha` o `FechaObservacion`), así que solo puedo mostrar un"
-      " promedio general."
+      "Tu CSV no tiene una columna de fecha reconocible (`fecha` o"
+      " `FechaObservacion`), mostrando promedio general."
   )
 
-st.sidebar.header("Controles topográficos 3D")
+st.sidebar.header("🎛️ Controles Topográficos 3D")
 exag = st.sidebar.slider("Exageración vertical (×):", 2, 30, 12, step=1)
-suavizado = st.sidebar.slider("Suavizado espacial:", 0.0, 1.5, 0.25, step=0.05)
-bandas_discretas = st.sidebar.checkbox("Bandas térmicas definidas (isotermas)", value=True)
-camara = st.sidebar.selectbox("Vista de cámara:", list(CAMARAS.keys()))
+suavizado = st.sidebar.slider("Suavizado espacial:", 0.0, 1.5, 0.30, step=0.05)
+bandas_discretas = st.sidebar.checkbox(
+    "Bandas térmicas definidas (isotermas)", value=True
+)
 mostrar_deptos = st.sidebar.checkbox(
     "Líneas departamentales sobre relieve", value=True
 )
@@ -612,11 +610,9 @@ def calcular(ini, fin):
   r = interpolar_periodo(RUTA_CSV, mtime, ini, fin, RESOLUCION)
   if r is None:
     return None
-  return (
-      gaussian_filter(r["temp"], suavizado),
-      gaussian_filter(r["anom"], suavizado),
-      r["n_est"],
-  )
+  t_out = gaussian_filter(r["temp"], suavizado) if suavizado > 0 else r["temp"]
+  a_out = gaussian_filter(r["anom"], suavizado) if suavizado > 0 else r["anom"]
+  return t_out, a_out, r["n_est"]
 
 
 def mascara_filtrada(temp):
@@ -635,20 +631,21 @@ def mascara_filtrada(temp):
 
 
 # ----------------------------------------------------------------------------
-# FIGURA 3D
+# FIGURA 3D CON NAVEGACIÓN TÁCTIL SIMPLIFICADA
 # ----------------------------------------------------------------------------
-def construir_figura(valores, mascara_activa):
+def construir_figura(valores, mascara_activa, modo_tactil, vista_rapida):
   grid_lon, grid_lat, elev = base["grid_lon"], base["grid_lat"], base["elev"]
   n = elev.shape[0]
   X, Y = a_km(grid_lon, grid_lat)
-  Z = elev / 1000.0 * exag  # km, con exageración vertical
+  Z = elev / 1000.0 * exag
 
   fig = go.Figure()
 
   if mostrar_vecinos:
+    mascara_fondo = base["mascara_vec"] | base["mascara_col"]
     fig.add_trace(
         go.Surface(
-            x=X, y=Y, z=np.where(base["mascara_vec"], Z, np.nan),
+            x=X, y=Y, z=np.where(mascara_fondo, Z - 0.15, np.nan),
             surfacecolor=elev,
             colorscale=[
                 [0.0, "#141b2b"], [0.45, "#2b3649"],
@@ -660,7 +657,18 @@ def construir_figura(valores, mascara_activa):
     )
 
   if modo_mapa == MODO_TEMP:
-    escala, cmin, cmax, titulo_barra = ESCALA_TEMP, T_MIN, T_MAX, "Temp (°C)"
+    if bandas_discretas:
+      escala = []
+      for idx_p in range(len(PARADAS_TEMP) - 1):
+        v0, c0 = PARADAS_TEMP[idx_p]
+        v1, _ = PARADAS_TEMP[idx_p + 1]
+        p0 = (v0 - T_MIN) / (T_MAX - T_MIN)
+        p1 = (v1 - T_MIN) / (T_MAX - T_MIN)
+        escala.extend([[p0, c0], [max(p0, p1 - 0.002), c0]])
+      escala.append([1.0, PARADAS_TEMP[-1][1]])
+    else:
+      escala = ESCALA_TEMP
+    cmin, cmax, titulo_barra = T_MIN, T_MAX, "Temp (°C)"
   else:
     escala, cmin, cmax, titulo_barra = (
         ESCALA_ANOM, -ANOM_LIM, ANOM_LIM, "Anomalía (°C)"
@@ -694,7 +702,6 @@ def construir_figura(valores, mascara_activa):
     out[ok] = map_coordinates(elev, [fi[ok], fj[ok]], order=1, mode="nearest")
     return out / 1000.0 * exag
 
-  # Líneas departamentales (o contorno del país)
   if mostrar_deptos and deptos_geojson is not None:
     polys = []
     for feat in deptos_geojson["features"]:
@@ -716,17 +723,11 @@ def construir_figura(valores, mascara_activa):
   if lx:
     lon_l, lat_l = np.concatenate(lx), np.concatenate(ly)
     xl, yl = a_km(lon_l, lat_l)
-    # Desplazamiento proporcional a la exageración vertical para que nunca se hundan
-    z_borde = altura(lon_l, lat_l) + (0.35 * exag)
     fig.add_trace(
         go.Scatter3d(
-            x=xl,
-            y=yl,
-            z=z_borde,
-            mode="lines",
-            line=dict(color="#0a0f1d", width=1.4),
-            hoverinfo="skip",
-            showlegend=False,
+            x=xl, y=yl, z=altura(lon_l, lat_l) + (0.25 * exag), mode="lines",
+            line=dict(color="#070b14", width=1.4),
+            hoverinfo="skip", showlegend=False,
         )
     )
 
@@ -738,34 +739,45 @@ def construir_figura(valores, mascara_activa):
       if mascara_activa[i, j]:
         c_lon.append(lon)
         c_lat.append(lat)
-        c_z.append(float(altura(np.array([lon]), np.array([lat]))[0]) + 5.0)
+        c_z.append(
+            float(altura(np.array([lon]), np.array([lat]))[0]) + (0.85 * exag)
+        )
         c_txt.append(nombre)
     if c_lon:
       cx, cy = a_km(np.array(c_lon), np.array(c_lat))
       fig.add_trace(
           go.Scatter3d(
               x=cx, y=cy, z=c_z, mode="markers+text",
-              marker=dict(size=3.5, color="white",
-                          line=dict(color="black", width=1)),
+              marker=dict(
+                  size=3.5, color="white", line=dict(color="black", width=1)
+              ),
               text=c_txt, textposition="top center",
               textfont=dict(color="white", size=10.5, family="Arial Black"),
               hoverinfo="text", showlegend=False,
           )
       )
 
+  drag_map = {
+      "Rotar mapa (Tornamesa)": "turntable",
+      "Mover / Desplazar": "pan",
+      "Bloquear mapa (bajar página)": False,
+  }
+
   x0, y0 = a_km(LON_MIN, LAT_MIN)
   x1, y1 = a_km(LON_MAX, LAT_MAX)
   fig.update_layout(
-      height=780,
+      height=680,
       margin=dict(l=0, r=0, t=0, b=0),
       paper_bgcolor=BG,
       showlegend=False,
+      dragmode=drag_map[modo_tactil],
+      uirevision="mantener_camara",
       scene=dict(
           xaxis=dict(visible=False, range=[float(x0), float(x1)]),
           yaxis=dict(visible=False, range=[float(y0), float(y1)]),
           zaxis=dict(visible=False, range=[0, 6.2 * exag]),
           aspectmode="data",
-          camera=CAMARAS[camara],
+          camera=CAMARAS[vista_rapida],
           bgcolor=BG,
       ),
   )
@@ -801,7 +813,7 @@ def grafico_serie(serie, ini, fin):
 
 
 # ----------------------------------------------------------------------------
-# INFOGRAFÍA (PNG descargable, mapa 2D con hillshade)
+# PLANCHA CARTOGRÁFICA (PNG DESCARGABLE)
 # ----------------------------------------------------------------------------
 def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   import matplotlib
@@ -815,7 +827,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   from matplotlib.patches import Polygon, Rectangle
   from scipy.ndimage import zoom
 
-  # --- 1. PREPARAR RASTER CON SOMBRADO TOPOGRÁFICO ---
   lons, lats = base["grid_lon"][0], base["grid_lat"][:, 0]
   lon_w, lon_e = -79.8, -66.2
   lat_s, lat_n = -4.6, 13.0
@@ -834,7 +845,7 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   val = prep_arr(valores, 1)
   act = prep_mask(mascara_activa)
   col = prep_mask(base["mascara_col"])
-  vec = prep_mask(base["mascara_vec"])
+  vec = prep_mask(base["mascara_vec"]) & ~col
 
   if modo_mapa == MODO_TEMP:
     paradas_ideam = [
@@ -852,8 +863,8 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
     titulo_mapa = "ANOMALÍA DE\nTEMPERATURA\nDEL AIRE (°C)"
 
   rgb = np.zeros(elev.shape + (3,))
-  rgb[:] = to_rgb("#cce3f5")  # Océanos
-  rgb[vec] = to_rgb("#e5ebe3")  # Países vecinos
+  rgb[:] = to_rgb("#cce3f5")
+  rgb[vec] = to_rgb("#e5ebe3")
   rgb[col & ~act] = to_rgb("#d1d5db")
   rgb[act] = cmap(norm(val[act]))[:, :3]
 
@@ -868,21 +879,18 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
       1,
   )
 
-  # --- 2. LIENZO DE PLANCHA CARTOGRÁFICA ---
   fig = plt.figure(figsize=(10.5, 14.0), facecolor="white")
 
   ax = fig.add_axes([0.07, 0.24, 0.86, 0.71], facecolor="#cce3f5")
   ext = [lons[j0], lons[j1 - 1], lats[i0], lats[i1 - 1]]
   ax.imshow(rgb, extent=ext, interpolation="bilinear", aspect="auto")
 
-  # Fronteras internacionales (recortadas por xlim/ylim más abajo)
   _, geojson_vec_local, _ = cargar_cartografia()
   for poly in geojson_vec_local["coordinates"]:
     for ring in poly:
       arr = np.asarray(ring, dtype=float)[:, :2]
       ax.plot(arr[:, 0], arr[:, 1], color="#64748b", lw=0.75, ls="--", alpha=0.85)
 
-  # Límites departamentales
   if deptos_geojson is not None:
     for feat in deptos_geojson["features"]:
       g = feat["geometry"]
@@ -894,11 +902,9 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
           arr = np.asarray(ring, dtype=float)[:, :2]
           ax.plot(arr[:, 0], arr[:, 1], color="#1e293b", lw=0.75)
 
-  # ¡CLAVE! Encuadre estricto sobre Colombia para recortar Sudamérica
   ax.set_xlim(lons[j0], lons[j1 - 1])
   ax.set_ylim(lats[i0], lats[i1 - 1])
 
-  # Grilla de coordenadas
   xticks = np.arange(-78, -66, 3)
   yticks = np.arange(-3, 13, 3)
   ax.set_xticks(xticks)
@@ -920,7 +926,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
     spine.set_edgecolor("#0f172a")
     spine.set_linewidth(1.8)
 
-  # Etiquetas de océanos y países vecinos
   estilo_pais = dict(color="#475569", fontsize=10.5, fontweight="bold", alpha=0.85)
   ax.text(-78.5, 8.6, "Panamá", **estilo_pais)
   ax.text(-69.5, 8.3, "Venezuela", **estilo_pais)
@@ -938,7 +943,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
       fontweight="bold", style="italic", path_effects=halo_mar,
   )
 
-  # Ciudades principales
   halo_txt = [pe.withStroke(linewidth=2.2, foreground="white")]
   if mostrar_ciudades:
     for nombre, lat, lon in CIUDADES:
@@ -954,7 +958,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
               ha="center", fontweight="bold", path_effects=halo_txt, zorder=7,
           )
 
-  # --- 3. RECUADRO INSET: SAN ANDRÉS Y PROVIDENCIA ---
   ax_sai = fig.add_axes([0.095, 0.80, 0.11, 0.125], facecolor="#cce3f5")
   ax_sai.set_xlim(-81.85, -81.25)
   ax_sai.set_ylim(12.45, 13.45)
@@ -976,7 +979,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
     s.set_edgecolor("#0f172a")
     s.set_linewidth(1.1)
 
-  # --- 4. ROSA DE LOS VIENTOS Y ESCALA GRÁFICA ---
   ax_n = fig.add_axes([0.10, 0.30, 0.06, 0.06], facecolor="none")
   ax_n.set_xlim(-1, 1)
   ax_n.set_ylim(-1, 1)
@@ -995,7 +997,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   ax_sc.text(150, 0.05, "150", fontsize=6.5, ha="center")
   ax_sc.text(300, 0.05, "300 km", fontsize=6.5, ha="center")
 
-  # --- 5. CAJETÍN CARTOGRÁFICO INFERIOR ---
   ax_caj = fig.add_axes([0.07, 0.035, 0.86, 0.175], facecolor="white")
   ax_caj.set_xlim(0, 1)
   ax_caj.set_ylim(0, 1)
@@ -1008,7 +1009,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   for x_div in [0.29, 0.49, 0.71]:
     ax_caj.plot([x_div, x_div], [0, 1], color="#0f172a", lw=1.2)
 
-  # Columna 1: Título Institucional y Periodo
   ax_caj.add_patch(Rectangle((0.0, 0.78), 0.29, 0.22, facecolor="#0284c7"))
   ax_caj.text(
       0.145, 0.89, "GEOPORTAL AMBIENTAL · COLOMBIA", color="white",
@@ -1027,7 +1027,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
       fontsize=7.5, fontweight="bold", ha="center", va="center",
   )
 
-  # Columna 2: Leyenda discreta
   ax_caj.text(
       0.39, 0.90, "Leyenda (°C)" if modo_mapa == MODO_TEMP else "Anomalía (°C)",
       fontsize=8.5, fontweight="bold", ha="center", color="#0f172a",
@@ -1061,7 +1060,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
     )
     ax_caj.text(0.372, yy - 0.015, lbl_r, fontsize=7.3, va="center", color="#1e293b")
 
-  # Columna 3: Convenciones
   ax_caj.text(
       0.60, 0.90, "Convenciones", fontsize=8.5, fontweight="bold",
       ha="center", color="#0f172a",
@@ -1078,7 +1076,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   ax_caj.add_patch(Rectangle((0.508, 0.23), 0.034, 0.06, facecolor="#cce3f5", edgecolor="#64748b", lw=0.5))
   ax_caj.text(0.55, 0.26, "Océanos / Agua", fontsize=7.2, va="center")
 
-  # Columna 4: Información de Referencia
   ax_caj.text(
       0.855, 0.90, "Información de Referencia", fontsize=8.5,
       fontweight="bold", ha="center", color="#0f172a",
@@ -1113,18 +1110,6 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
 # ----------------------------------------------------------------------------
 # RENDER PRINCIPAL
 # ----------------------------------------------------------------------------
-c_nav1, c_nav2 = st.columns([2, 1])
-with c_nav1:
-  modo_tactil = st.radio(
-      "Control táctil / mouse:",
-      ["Rotar mapa (Tornamesa)", "Mover / Desplazar", "Bloquear mapa (para bajar página)"],
-      horizontal=True,
-  )
-with c_nav2:
-  vista_rapida = st.selectbox(
-      "Enfoque rápido:",
-      ["Inclinada (3D)", "Desde arriba (2D)", "Cordilleras (Rasante)"],
-  )
 res = calcular(ini_s, fin_s)
 if res is None:
   st.warning("No hay estaciones con datos en ese periodo. Prueba otro rango.")
@@ -1134,23 +1119,46 @@ valores = grid_temp if modo_mapa == MODO_TEMP else grid_anom
 mascara_activa = mascara_filtrada(grid_temp)
 
 if not mascara_activa.any():
-  st.warning("Los filtros actuales no dejan ningún territorio. Ajusta región o piso térmico.")
+  st.warning(
+      "Los filtros actuales no dejan ningún territorio. Ajusta región o piso térmico."
+  )
   st.stop()
 
 temps_validas = grid_temp[mascara_activa]
 pct_calor = float(np.mean(temps_validas >= 27.0) * 100)
 kpi_vals = [
     ("Temperatura media", f"{np.nanmean(temps_validas):.1f} °C"),
-    ("Mín / Máx", f"{np.nanmin(temps_validas):.1f}° / {np.nanmax(temps_validas):.1f}°"),
+    (
+        "Mín / Máx",
+        f"{np.nanmin(temps_validas):.1f}° / {np.nanmax(temps_validas):.1f}°",
+    ),
     ("Calor intenso (≥27 °C)", f"{pct_calor:.0f}%"),
     ("Estaciones usadas", f"{n_est}"),
 ]
 
 k1, k2, k3, k4 = st.columns(4)
-k1.metric("Periodo", f"{etiqueta_periodo} · {region_sel.split(' (')[0]}")
-k2.metric("Temperatura media", kpi_vals[0][1])
-k3.metric("Rango térmico (Mín / Máx)", kpi_vals[1][1])
-k4.metric("Territorio en calor intenso (≥27°C)", kpi_vals[2][1])
+k1.metric("Periodo · Área", f"{etiqueta_periodo} · {region_sel.split(' (')[0]}")
+k2.metric("Temperatura Media", kpi_vals[0][1])
+k3.metric("Rango Térmico (Mín / Máx)", kpi_vals[1][1])
+k4.metric("Territorio en Calor Intenso (≥27°C)", kpi_vals[2][1])
+
+# Barra superior de navegación táctil / mouse
+c_nav1, c_nav2 = st.columns([2, 1])
+with c_nav1:
+  modo_tactil = st.radio(
+      "Control táctil / mouse:",
+      [
+          "Rotar mapa (Tornamesa)",
+          "Mover / Desplazar",
+          "Bloquear mapa (bajar página)",
+      ],
+      horizontal=True,
+  )
+with c_nav2:
+  vista_rapida = st.selectbox(
+      "Enfoque rápido:",
+      ["Inclinada (3D)", "Desde arriba (2D)", "Cordilleras (Rasante)"],
+  )
 
 titulo_ph = st.empty()
 mapa_ph = st.empty()
@@ -1168,15 +1176,21 @@ if reproducir and meses_disponibles is not None:
         f"### {MESES_LARGO[p.month - 1]} {p.year} · {np.nanmean(t_[m_]):.1f} °C"
     )
     mapa_ph.plotly_chart(
-        construir_figura(t_ if modo_mapa == MODO_TEMP else a_, m_),
-        use_container_width=True, key=f"anim_{p}",
+        construir_figura(
+            t_ if modo_mapa == MODO_TEMP else a_, m_, modo_tactil, vista_rapida
+        ),
+        use_container_width=True,
+        key=f"anim_{p}",
+        config={"displaylogo": False, "scrollZoom": True},
     )
     time.sleep(0.7)
   titulo_ph.empty()
 
 mapa_ph.plotly_chart(
-    construir_figura(valores, mascara_activa),
-    use_container_width=True, key="mapa3d",
+    construir_figura(valores, mascara_activa, modo_tactil, vista_rapida),
+    use_container_width=True,
+    key="mapa3d",
+    config={"displaylogo": False, "scrollZoom": True},
 )
 
 serie = serie_mensual(RUTA_CSV, mtime) if tiene_fecha else None
@@ -1185,10 +1199,11 @@ if serie is not None and len(serie) >= 2:
 
 st.caption(
     "Relieve: "
-    + ("modelo de elevación real (AWS Terrain Tiles / SRTM)."
-       if base["dem_real"]
-       else "⚠️ SINTÉTICO (no pude descargar el DEM real; revisa tu internet"
-            " y usa el botón de recargar).")
+    + (
+        "modelo de elevación real (AWS Terrain Tiles / SRTM)."
+        if base["dem_real"]
+        else "⚠️ SINTÉTICO (revisa tu conexión y usa el botón de recargar)."
+    )
     + " La temperatura se interpola con IDW sobre los residuos del gradiente"
       " altitudinal; la anomalía compara cada periodo con el promedio del año"
       " de la misma estación."
@@ -1197,13 +1212,13 @@ st.caption(
 # ----------------------------------------------------------------------------
 # BARRA LATERAL: infografía y mantenimiento
 # ----------------------------------------------------------------------------
-st.sidebar.header("Infografía")
-if st.sidebar.button("Generar infografía PNG"):
+st.sidebar.header("🖼️ Plancha Cartográfica")
+if st.sidebar.button("Generar plancha PNG"):
   try:
-    with st.spinner("Dibujando infografía…"):
+    with st.spinner("Dibujando plancha cartográfica…"):
       png = generar_infografia(valores, mascara_activa, kpi_vals, serie, n_est)
     nombre_png = (
-        f"infografia_temperatura_{_normalizar(etiqueta_periodo)}"
+        f"plancha_temperatura_{_normalizar(etiqueta_periodo)}"
         f"_{_normalizar(region_sel.split(' (')[0])}.png"
     )
     st.session_state["infografia"] = (nombre_png, png)
@@ -1213,10 +1228,13 @@ if st.sidebar.button("Generar infografía PNG"):
 if "infografia" in st.session_state:
   nombre_png, png = st.session_state["infografia"]
   st.sidebar.download_button(
-      "⬇️ Descargar infografía", data=png, file_name=nombre_png, mime="image/png"
+      "⬇️ Descargar plancha PNG",
+      data=png,
+      file_name=nombre_png,
+      mime="image/png",
   )
   st.sidebar.caption("Se genera con los filtros del momento de pulsar el botón.")
 
-if st.sidebar.button("Recargar relieve y caché"):
+if st.sidebar.button("♻️ Recargar relieve y caché"):
   st.cache_data.clear()
   st.rerun()
