@@ -1113,6 +1113,18 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
 # ----------------------------------------------------------------------------
 # RENDER PRINCIPAL
 # ----------------------------------------------------------------------------
+c_nav1, c_nav2 = st.columns([2, 1])
+with c_nav1:
+  modo_tactil = st.radio(
+      "Control táctil / mouse:",
+      ["Rotar mapa (Tornamesa)", "Mover / Desplazar", "Bloquear mapa (para bajar página)"],
+      horizontal=True,
+  )
+with c_nav2:
+  vista_rapida = st.selectbox(
+      "Enfoque rápido:",
+      ["Inclinada (3D)", "Desde arriba (2D)", "Cordilleras (Rasante)"],
+  )
 res = calcular(ini_s, fin_s)
 if res is None:
   st.warning("No hay estaciones con datos en ese periodo. Prueba otro rango.")
