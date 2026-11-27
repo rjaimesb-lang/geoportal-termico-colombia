@@ -79,18 +79,110 @@ NOMBRES_FECHA = {
     "date", "datetime", "timestamp",
 }
 
-T_MIN, T_MAX = 4.0, 32.0
-PARADAS_TEMP = [
-    (4, "#eef6ff"), (10, "#60a5fa"), (14, "#22d3ee"), (18, "#86efac"),
-    (21, "#fde047"), (24, "#fb923c"), (27, "#ef4444"), (30, "#991b1b"),
-    (32, "#450a0a"),
+# Cada variable define su archivo, cómo se agrega, su paleta y sus textos.
+# Para sumar una variable nueva basta con añadir otra entrada aquí.
+_LEY_DIV_TEMP = [
+    ("#1d4ed8", "< -2.0 °C"), ("#60a5fa", "-2.0 a -0.5 °C"),
+    ("#f8fafc", "-0.5 a +0.5 °C"), ("#fb923c", "+0.5 a +2.0 °C"),
+    ("#991b1b", "> +2.0 °C"),
 ]
-ESCALA_TEMP = [[(t - T_MIN) / (T_MAX - T_MIN), c] for t, c in PARADAS_TEMP]
-ANOM_LIM = 3.0
-ESCALA_ANOM = [
-    [0.0, "#1d4ed8"], [0.25, "#60a5fa"], [0.5, "#f8fafc"],
-    [0.75, "#fb923c"], [1.0, "#991b1b"],
+_PARADAS_LLUVIA = [
+    (0, "#fef3c7"), (10, "#fde68a"), (25, "#e0f2fe"), (50, "#bae6fd"),
+    (100, "#7dd3fc"), (200, "#38bdf8"), (300, "#2563eb"), (450, "#4338ca"),
+    (600, "#581c87"),
 ]
+VARIABLES = {
+    "Temperatura": dict(
+        archivo="temperaturas.csv",
+        alias={"temperatura", "temp", "valor", "valorobservado"},
+        unidad="°C", unidad_anom="°C", dec=1, agg_dia="mean", lapse=True,
+        vmin=4.0, vmax=32.0,
+        paradas=[
+            (4, "#eef6ff"), (10, "#60a5fa"), (14, "#22d3ee"), (18, "#86efac"),
+            (21, "#fde047"), (24, "#fb923c"), (27, "#ef4444"), (30, "#991b1b"),
+            (32, "#450a0a"),
+        ],
+        escala_div=[
+            [0.0, "#1d4ed8"], [0.25, "#60a5fa"], [0.5, "#f8fafc"],
+            [0.75, "#fb923c"], [1.0, "#991b1b"],
+        ],
+        anom_rango=(-3.0, 3.0), anom_centro=0.0, lim_cambio=3.0,
+        etq_modo="Temperatura Media", nombre_media="Temperatura media",
+        kpi=["Temperatura Media", "Rango Térmico (Mín / Máx)",
+             "Territorio en Calor Intenso (≥27°C)"],
+        kpi_corto=["Temperatura media", "Mín / Máx", "Calor intenso (≥27 °C)"],
+        kpi_cambio=["Cambio medio (B − A)", "Rango del cambio",
+                    "Territorio que subió > 0.5 °C"],
+        alerta=lambda t, a: t >= 27.0,
+        cambio_alerta=lambda d: d > 0.5,
+        nombre_alerta="% del territorio ≥ 27 °C",
+        etq_extremo="Mes más cálido", extremo="max",
+        etq_alerta="Mayor territorio ≥ 27 °C",
+        fuente="IDEAM (Datos Abiertos Colombia · sbwg-7ju4)",
+        metodo="IDW + Gradiente Altitudinal",
+        plancha_paradas=[
+            (4, "#1d4ed8"), (10, "#38bdf8"), (14, "#67e8f9"), (18, "#4ade80"),
+            (21, "#fde047"), (24, "#f59e0b"), (27, "#f97316"), (30, "#dc2626"),
+            (32, "#7f1d1d"),
+        ],
+        plancha_titulo="DISTRIBUCIÓN DE LA\nTEMPERATURA MEDIA\nDEL AIRE (°C)",
+        plancha_titulo_anom="ANOMALÍA DE\nTEMPERATURA\nDEL AIRE (°C)",
+        plancha_titulo_cambio="CAMBIO DE\nTEMPERATURA\nDEL AIRE (°C)",
+        leyenda=[
+            ("#1d4ed8", "< 10 °C"), ("#38bdf8", "10 – 14 °C"),
+            ("#4ade80", "14 – 18 °C"), ("#fde047", "18 – 21 °C"),
+            ("#f59e0b", "21 – 24 °C"), ("#f97316", "24 – 27 °C"),
+            ("#dc2626", "27 – 30 °C"), ("#7f1d1d", "> 30 °C"),
+        ],
+        leyenda_anom=_LEY_DIV_TEMP, leyenda_cambio=_LEY_DIV_TEMP,
+    ),
+    "Precipitación": dict(
+        archivo="precipitacion.csv",
+        alias={"precipitacion", "precip", "lluvia", "valor", "valorobservado"},
+        unidad="mm/mes", unidad_anom="% del promedio", dec=0, agg_dia="sum",
+        lapse=False,
+        vmin=0.0, vmax=600.0,
+        paradas=_PARADAS_LLUVIA,
+        escala_div=[
+            [0.0, "#7f1d1d"], [0.25, "#f59e0b"], [0.5, "#f8fafc"],
+            [0.75, "#60a5fa"], [1.0, "#1d4ed8"],
+        ],
+        anom_rango=(0.0, 200.0), anom_centro=100.0, lim_cambio=150.0,
+        etq_modo="Precipitación", nombre_media="Lluvia media",
+        kpi=["Lluvia media (mm/mes)", "Rango (Mín / Máx)",
+             "Territorio con déficit (< 50 % del promedio)"],
+        kpi_corto=["Lluvia media", "Mín / Máx", "Déficit (< 50 % del promedio)"],
+        kpi_cambio=["Cambio medio (B − A)", "Rango del cambio",
+                    "Territorio con menos lluvia en B"],
+        alerta=lambda t, a: a < 50.0,
+        cambio_alerta=lambda d: d < 0.0,
+        nombre_alerta="% del territorio con déficit (< 50 %)",
+        etq_extremo="Mes más seco", extremo="min",
+        etq_alerta="Mayor territorio con déficit (< 50 % del promedio)",
+        fuente="IDEAM (Datos Abiertos Colombia)",
+        metodo="IDW (sin corrección altitudinal)",
+        plancha_paradas=_PARADAS_LLUVIA,
+        plancha_titulo="DISTRIBUCIÓN DE LA\nPRECIPITACIÓN\n(mm/mes)",
+        plancha_titulo_anom="ANOMALÍA DE LA\nPRECIPITACIÓN\n(% DEL PROMEDIO)",
+        plancha_titulo_cambio="CAMBIO DE LA\nPRECIPITACIÓN\n(mm/mes)",
+        leyenda=[
+            ("#fef3c7", "< 10 mm"), ("#e0f2fe", "10 – 50 mm"),
+            ("#7dd3fc", "50 – 100 mm"), ("#38bdf8", "100 – 200 mm"),
+            ("#2563eb", "200 – 300 mm"), ("#4338ca", "300 – 450 mm"),
+            ("#581c87", "> 450 mm"),
+        ],
+        leyenda_anom=[
+            ("#7f1d1d", "< 40 %"), ("#f59e0b", "40 – 80 %"),
+            ("#f8fafc", "80 – 120 %"), ("#60a5fa", "120 – 160 %"),
+            ("#1d4ed8", "> 160 %"),
+        ],
+        leyenda_cambio=[
+            ("#7f1d1d", "< -90 mm"), ("#f59e0b", "-90 a -30 mm"),
+            ("#f8fafc", "-30 a +30 mm"), ("#60a5fa", "+30 a +90 mm"),
+            ("#1d4ed8", "> +90 mm"),
+        ],
+    ),
+}
 
 LUZ = dict(ambient=0.38, diffuse=0.95, specular=0.06, roughness=0.78, fresnel=0.06)
 POS_LUZ = dict(x=-4000, y=4000, z=3000)
@@ -215,7 +307,8 @@ def colorear(valores):
       idx = np.clip(np.digitize(valores, xs) - 1, 0, len(xs) - 1)
       return cols[idx]
   else:
-    xs = np.array([p for p, _ in ESCALA_ANOM]) * 2 * ANOM_LIM - ANOM_LIM
+    lo, hi = rango_div()
+    xs = np.array([p for p, _ in ESCALA_ANOM]) * (hi - lo) + lo
     cols = np.stack([_hex(c) for _, c in ESCALA_ANOM])
   return np.stack(
       [np.interp(valores, xs, cols[:, k]) for k in range(3)], axis=-1
@@ -408,9 +501,20 @@ def cargar_datos(ruta_csv, mtime):
   else:
     df["fecha"] = pd.NaT
 
-  for col in ["latitud", "longitud", "temperatura"]:
+  col_valor = next(
+      (c for c in df.columns if _normalizar(c) in VAR["alias"]), None
+  )
+  if col_valor is None:
+    raise ValueError(
+        "No encuentro la columna de valores en el CSV. Debe llamarse una de:"
+        f" {', '.join(sorted(VAR['alias']))}."
+    )
+  df["valor"] = pd.to_numeric(df[col_valor], errors="coerce")
+  for col in ["latitud", "longitud"]:
     df[col] = pd.to_numeric(df[col], errors="coerce")
-  df = df.dropna(subset=["latitud", "longitud", "temperatura"])
+  df = df.dropna(subset=["latitud", "longitud", "valor"])
+  if VAR["agg_dia"] == "sum":
+    df = df[df["valor"] >= 0]  # descarta códigos de dato faltante (-999, etc.)
   df = df[
       (df["latitud"].between(-4.3, 12.6))
       & (df["longitud"].between(-79.2, -66.8))
@@ -424,16 +528,47 @@ def cargar_datos(ruta_csv, mtime):
       .str.encode("ascii", errors="ignore")
       .str.decode("utf-8")
   )
+  if df["fecha"].notna().any():
+    # Un valor por estación y día (lluvia: suma del día; temperatura: promedio)
+    df = df.dropna(subset=["fecha"]).copy()
+    df["fecha"] = df["fecha"].dt.normalize()
+    dep = df.groupby(["latitud", "longitud"], as_index=False)[
+        "departamento"
+    ].first()
+    df = (
+        df.groupby(["latitud", "longitud", "fecha"], as_index=False)["valor"]
+        .agg(VAR["agg_dia"])
+        .merge(dep, on=["latitud", "longitud"])
+    )
   return df
 
 
 def estaciones_periodo(df, ini_s, fin_s):
+  """Valor por estación en el periodo.
+
+  Temperatura: promedio. Lluvia: tasa diaria media x 30.4 (mm/mes
+  equivalente), exigiendo datos en al menos 70 % de los días observados.
+  Columnas: latitud, longitud, valor y tasa (valor diario medio).
+  """
   d = df
+  hay_fecha = df["fecha"].notna().any()
   if ini_s is not None:
     d = d[
         (d["fecha"] >= pd.Timestamp(ini_s)) & (d["fecha"] <= pd.Timestamp(fin_s))
     ]
-  return d.groupby(["latitud", "longitud"], as_index=False)["temperatura"].mean()
+  if VAR["agg_dia"] == "mean" or not hay_fecha:
+    g = d.groupby(["latitud", "longitud"], as_index=False)["valor"].mean()
+    g["tasa"] = g["valor"]
+    return g
+  f_min, f_max = df["fecha"].min(), df["fecha"].max()
+  ini = max(pd.Timestamp(ini_s), f_min) if ini_s is not None else f_min
+  fin = min(pd.Timestamp(fin_s), f_max) if fin_s is not None else f_max
+  dias = max((fin.normalize() - ini.normalize()).days + 1, 1)
+  g = d.groupby(["latitud", "longitud"])["valor"].agg(["sum", "count"])
+  g = g[g["count"] >= 0.7 * dias]
+  g["tasa"] = g["sum"] / g["count"]
+  g["valor"] = g["tasa"] * 30.4
+  return g.reset_index()[["latitud", "longitud", "valor", "tasa"]]
 
 
 @st.cache_data(show_spinner="Preparando relieve, fronteras y malla…")
@@ -507,7 +642,7 @@ def interpolar_periodo(ruta_csv, mtime, ini_s, fin_s, resolucion, solo_estables)
 
   lat_e = est["latitud"].to_numpy()
   lon_e = est["longitud"].to_numpy()
-  t = est["temperatura"].to_numpy()
+  t = est["valor"].to_numpy()
   z_e = (
       elev[
           _idx_grid(lat_e, LAT_MIN, LAT_MAX, n),
@@ -516,23 +651,37 @@ def interpolar_periodo(ruta_csv, mtime, ini_s, fin_s, resolucion, solo_estables)
       / 1000.0
   )
 
-  pend = -6.0
-  if len(t) >= 15 and np.ptp(z_e) > 0.5:
-    pend = float(np.clip(np.polyfit(z_e, t, 1)[0], -8.0, -4.0))
-  t0 = float(np.mean(t - pend * z_e))
-  residuo = t - (t0 + pend * z_e)
-  temp = t0 + pend * elev / 1000.0 + idw(lat_e, lon_e, residuo)
+  pend = 0.0
+  if VAR["lapse"]:
+    pend = -6.0
+    if len(t) >= 15 and np.ptp(z_e) > 0.5:
+      pend = float(np.clip(np.polyfit(z_e, t, 1)[0], -8.0, -4.0))
+    t0 = float(np.mean(t - pend * z_e))
+    residuo = t - (t0 + pend * z_e)
+    temp = t0 + pend * elev / 1000.0 + idw(lat_e, lon_e, residuo)
+  else:
+    temp = np.clip(idw(lat_e, lon_e, t), 0, None)
 
-  anom = np.zeros(forma)
+  anom = np.full(forma, float(VAR["anom_centro"]))
   if ini_s is not None:
     todas = estaciones_periodo(df, None, None)
-    m = est.merge(todas, on=["latitud", "longitud"], suffixes=("", "_anual"))
-    if len(m) >= 3:
-      anom = idw(
-          m["latitud"].to_numpy(),
-          m["longitud"].to_numpy(),
-          (m["temperatura"] - m["temperatura_anual"]).to_numpy(),
-      )
+    m = est.merge(todas, on=["latitud", "longitud"], suffixes=("", "_ref"))
+    if VAR["lapse"]:  # temperatura: diferencia en °C
+      if len(m) >= 3:
+        anom = idw(
+            m["latitud"].to_numpy(), m["longitud"].to_numpy(),
+            (m["valor"] - m["valor_ref"]).to_numpy(),
+        )
+    else:  # lluvia: % del promedio diario de todos los datos cargados
+      m = m[m["tasa_ref"] > 0.05]
+      if len(m) >= 3:
+        anom = np.clip(
+            idw(
+                m["latitud"].to_numpy(), m["longitud"].to_numpy(),
+                (m["tasa"] / m["tasa_ref"] * 100.0).to_numpy(),
+            ),
+            0, 400,
+        )
 
   return dict(temp=temp, anom=anom, n_est=len(est), pendiente=pend)
 
@@ -560,7 +709,7 @@ def datos(ruta_csv, mtime, solo_estables):
 def estadisticas_mensuales(
     ruta_csv, mtime, resolucion, region, suavizado_s, solo_estables
 ):
-  """Temperatura media y % del territorio >= 27 °C por mes (área, no estaciones)."""
+  """Valor medio y % del territorio en alerta, por mes (área, no estaciones)."""
   d = datos(ruta_csv, mtime, solo_estables).dropna(subset=["fecha"])
   if d.empty:
     return None
@@ -580,11 +729,12 @@ def estadisticas_mensuales(
     if r is None:
       continue
     t = gaussian_filter(r["temp"], suavizado_s) if suavizado_s > 0 else r["temp"]
+    an = gaussian_filter(r["anom"], suavizado_s) if suavizado_s > 0 else r["anom"]
     filas.append(
         dict(
             mes=p.start_time,
-            temp_media=float(t[m].mean()),
-            pct_calor=float((t[m] >= 27.0).mean() * 100),
+            media=float(t[m].mean()),
+            pct_alerta=float(np.mean(VAR["alerta"](t[m], an[m])) * 100),
             n_est=r["n_est"],
             parcial=es_parcial(p, f_min, f_max),
         )
@@ -597,32 +747,51 @@ def estadisticas_mensuales(
 # ----------------------------------------------------------------------------
 # DATOS DE ENTRADA + BARRA LATERAL
 # ----------------------------------------------------------------------------
+st.sidebar.header("🌍 Filtros Ambientales (2026)")
+
+variable = st.sidebar.selectbox("Variable climática:", list(VARIABLES))
+VAR = VARIABLES[variable]
+RUTA_CSV = VAR["archivo"]
+UNIDAD = VAR["unidad"]
+T_MIN, T_MAX = VAR["vmin"], VAR["vmax"]
+PARADAS_TEMP = VAR["paradas"]
+ESCALA_TEMP = [[(t - T_MIN) / (T_MAX - T_MIN), c] for t, c in PARADAS_TEMP]
+ESCALA_ANOM = VAR["escala_div"]
+MODO_TEMP = f"{VAR['etq_modo']} ({UNIDAD})"
+MODO_ANOM = "Anomalía vs. promedio de los datos"
+
 if not os.path.exists(RUTA_CSV):
-  st.error(f"No encuentro `{RUTA_CSV}` junto a app.py.")
+  st.error(
+      f"No encuentro `{RUTA_CSV}` junto a app.py. Debe tener las columnas:"
+      " latitud, longitud, fecha, departamento y el valor"
+      f" ({', '.join(sorted(VAR['alias']))})."
+  )
   st.stop()
 
 mtime = os.path.getmtime(RUTA_CSV)
-df = cargar_datos(RUTA_CSV, mtime)
+try:
+  df = cargar_datos(RUTA_CSV, mtime)
+except ValueError as e:
+  st.error(str(e))
+  st.stop()
 tiene_fecha = bool(df["fecha"].notna().any())
 
-st.sidebar.header("🌍 Filtros Ambientales (2026)")
-
-modo_mapa = st.sidebar.radio(
-    "Variable climática a analizar:", [MODO_TEMP, MODO_ANOM]
-)
+modo_mapa = st.sidebar.radio("Visualizar:", [MODO_TEMP, MODO_ANOM])
 region_sel = st.sidebar.selectbox(
     "Región Natural de Colombia:", list(REGIONES_NATURALES.keys())
 )
-piso_termico = st.sidebar.selectbox(
-    "Piso Térmico (Clasificación Caldas):",
-    [
-        "Todos los pisos térmicos",
-        "Cálido (> 24 °C)",
-        "Templado (17.5 – 24 °C)",
-        "Frío (12 – 17.5 °C)",
-        "Páramo y Nevado (< 12 °C)",
-    ],
-)
+piso_termico = "Todos los pisos térmicos"
+if VAR["lapse"]:
+  piso_termico = st.sidebar.selectbox(
+      "Piso Térmico (Clasificación Caldas):",
+      [
+          "Todos los pisos térmicos",
+          "Cálido (> 24 °C)",
+          "Templado (17.5 – 24 °C)",
+          "Frío (12 – 17.5 °C)",
+          "Páramo y Nevado (< 12 °C)",
+      ],
+  )
 
 # Contenedores: fijan el orden de la página. La línea de tiempo va justo
 # encima del mapa para usarla con el pulgar en el celular.
@@ -749,7 +918,7 @@ base = construir_base(RUTA_CSV, mtime, RESOLUCION)
 geojson_col, _, deptos_geojson = cargar_cartografia()
 
 if modo_mapa == MODO_ANOM and not tiene_fecha:
-  st.warning("La anomalía necesita fechas en el CSV; muestro temperatura media.")
+  st.warning("La anomalía necesita fechas en el CSV; muestro el valor medio.")
   modo_mapa = MODO_TEMP
 
 
@@ -777,6 +946,19 @@ def mascara_filtrada(temp):
   return m
 
 
+def rango_div():
+  """Rango de la escala divergente: cambio entre meses o anomalía."""
+  if comparando:
+    return (-VAR["lim_cambio"], VAR["lim_cambio"])
+  return VAR["anom_rango"]
+
+
+def unidad_visible():
+  if modo_mapa == MODO_TEMP or comparando:
+    return UNIDAD
+  return VAR["unidad_anom"]
+
+
 def escala_actual():
   """(colorscale, cmin, cmax, título de la barra) según el modo elegido."""
   if modo_mapa == MODO_TEMP:
@@ -791,10 +973,11 @@ def escala_actual():
       escala.append([1.0, PARADAS_TEMP[-1][1]])
     else:
       escala = ESCALA_TEMP
-    return escala, T_MIN, T_MAX, "Temp (°C)"
+    return escala, T_MIN, T_MAX, f"{variable} ({UNIDAD})"
+  lo, hi = rango_div()
   return (
-      ESCALA_ANOM, -ANOM_LIM, ANOM_LIM,
-      "Cambio (°C)" if comparando else "Anomalía (°C)",
+      ESCALA_ANOM, lo, hi,
+      f"{'Cambio' if comparando else 'Anomalía'} ({unidad_visible()})",
   )
 
 
@@ -868,7 +1051,7 @@ def construir_figura(
               "<b>Lat:</b> %{customdata[1]:.2f}° | <b>Lon:</b>"
               " %{customdata[0]:.2f}°<br><b>Altitud:</b>"
               " %{customdata[2]:.0f} m<br><b>Valor:</b>"
-              " %{surfacecolor:.1f} °C<extra></extra>"
+              " %{surfacecolor:.1f} " + unidad_visible() + "<extra></extra>"
           ),
       )
   )
@@ -1021,7 +1204,8 @@ def construir_mapa_movil(valores, mascara_activa):
           ),
           customdata=np.column_stack([pv, elev_full[ii, jj]]),
           hovertemplate=(
-              "<b>Valor:</b> %{customdata[0]:.1f} °C<br><b>Altitud:</b>"
+              "<b>Valor:</b> %{customdata[0]:.1f} " + unidad_visible()
+              + "<br><b>Altitud:</b>"
               " %{customdata[1]:.0f} m<extra></extra>"
           ),
           showlegend=False,
@@ -1086,21 +1270,21 @@ def grafico_evolucion(stats, ini, fin):
   fig = go.Figure()
   fig.add_trace(
       go.Bar(
-          x=stats.index, y=stats["pct_calor"], yaxis="y2",
-          name="% del territorio ≥ 27 °C",
+          x=stats.index, y=stats["pct_alerta"], yaxis="y2",
+          name=VAR["nombre_alerta"],
           marker=dict(
               color="rgba(239,68,68,0.55)",
               pattern=dict(shape=patron, fgcolor="rgba(255,255,255,0.6)"),
           ),
-          hovertemplate="%{x|%b %Y}: %{y:.0f}% del territorio ≥ 27 °C<extra></extra>",
+          hovertemplate="%{x|%b %Y}: %{y:.0f}%<extra></extra>",
       )
   )
   fig.add_trace(
       go.Scatter(
-          x=stats.index, y=stats["temp_media"], name="Temperatura media",
+          x=stats.index, y=stats["media"], name=VAR["nombre_media"],
           mode="lines+markers", line=dict(color="#fb923c", width=3),
           marker=dict(size=7),
-          hovertemplate="%{x|%b %Y}: %{y:.1f} °C<extra></extra>",
+          hovertemplate="%{x|%b %Y}: %{y:.1f} " + UNIDAD + "<extra></extra>",
       )
   )
   if ini is not None:
@@ -1115,7 +1299,7 @@ def grafico_evolucion(stats, ini, fin):
       title=dict(text="Evolución mensual en el territorio", font=dict(size=14)),
       legend=dict(orientation="h", y=1.18, x=0),
       xaxis=dict(gridcolor="#1f2937"),
-      yaxis=dict(gridcolor="#1f2937", ticksuffix=" °C"),
+      yaxis=dict(gridcolor="#1f2937", ticksuffix=f" {UNIDAD}"),
       yaxis2=dict(overlaying="y", side="right", range=[0, 100],
                   ticksuffix="%", showgrid=False),
   )
@@ -1157,22 +1341,18 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   vec = prep_mask(base["mascara_vec"]) & ~col
 
   if modo_mapa == MODO_TEMP:
-    paradas_ideam = [
-        (4, "#1d4ed8"), (10, "#38bdf8"), (14, "#67e8f9"), (18, "#4ade80"),
-        (21, "#fde047"), (24, "#f59e0b"), (27, "#f97316"), (30, "#dc2626"),
-        (32, "#7f1d1d"),
+    escala_m = [
+        [(t - T_MIN) / (T_MAX - T_MIN), c] for t, c in VAR["plancha_paradas"]
     ]
-    escala_m = [[(t - T_MIN) / (T_MAX - T_MIN), c] for t, c in paradas_ideam]
     cmap = LinearSegmentedColormap.from_list("ideam", [tuple(p) for p in escala_m])
     norm = Normalize(T_MIN, T_MAX)
-    titulo_mapa = "DISTRIBUCIÓN DE LA\nTEMPERATURA MEDIA\nDEL AIRE (°C)"
+    titulo_mapa = VAR["plancha_titulo"]
   else:
     cmap = LinearSegmentedColormap.from_list("a", [tuple(p) for p in ESCALA_ANOM])
-    norm = Normalize(-ANOM_LIM, ANOM_LIM)
+    lo_d, hi_d = rango_div()
+    norm = Normalize(lo_d, hi_d)
     titulo_mapa = (
-        "CAMBIO DE\nTEMPERATURA\nDEL AIRE (°C)"
-        if comparando
-        else "ANOMALÍA DE\nTEMPERATURA\nDEL AIRE (°C)"
+        VAR["plancha_titulo_cambio"] if comparando else VAR["plancha_titulo_anom"]
     )
 
   rgb = np.zeros(elev.shape + (3,))
@@ -1341,28 +1521,13 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   )
 
   ax_caj.text(
-      0.39, 0.90, "Leyenda (°C)" if modo_mapa == MODO_TEMP else ("Cambio (°C)" if comparando else "Anomalía (°C)"),
+      0.39, 0.90, f"Leyenda ({UNIDAD})" if modo_mapa == MODO_TEMP else (f"Cambio ({UNIDAD})" if comparando else f"Anomalía ({VAR['unidad_anom']})"),
       fontsize=8.5, fontweight="bold", ha="center", color="#0f172a",
   )
   if modo_mapa == MODO_TEMP:
-    rangos_ley = [
-        ("#1d4ed8", "< 10 °C"),
-        ("#38bdf8", "10 – 14 °C"),
-        ("#4ade80", "14 – 18 °C"),
-        ("#fde047", "18 – 21 °C"),
-        ("#f59e0b", "21 – 24 °C"),
-        ("#f97316", "24 – 27 °C"),
-        ("#dc2626", "27 – 30 °C"),
-        ("#7f1d1d", "> 30 °C"),
-    ]
+    rangos_ley = VAR["leyenda"]
   else:
-    rangos_ley = [
-        ("#1d4ed8", "< -2.0 °C"),
-        ("#60a5fa", "-2.0 a -0.5 °C"),
-        ("#f8fafc", "-0.5 a +0.5 °C"),
-        ("#fb923c", "+0.5 a +2.0 °C"),
-        ("#991b1b", "> +2.0 °C"),
-    ]
+    rangos_ley = VAR["leyenda_cambio"] if comparando else VAR["leyenda_anom"]
 
   y_top = 0.77
   step_y = 0.72 / len(rangos_ley)
@@ -1400,7 +1565,7 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
       f"{kpis[0][0].upper()}: {kpis[0][1]}\n"
       f"{kpis[1][0].upper()}: {kpis[1][1]}\n"
       f"{kpis[2][0].upper()}: {kpis[2][1]}\n"
-      f"MÉTODO: IDW + Gradiente Altitudinal"
+      f"MÉTODO: {VAR['metodo']}"
   )
   ax_caj.text(
       0.722, 0.45, meta_txt, fontsize=6.9, va="center", ha="left",
@@ -1409,7 +1574,7 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
 
   fig.text(
       0.5, 0.015,
-      "Fuente de datos: IDEAM (Datos Abiertos Colombia · sbwg-7ju4) · Modelo"
+      f"Fuente de datos: {VAR['fuente']} · Modelo"
       " Digital de Elevación: SRTM / AWS Terrain Tiles",
       ha="center", color="#475569", fontsize=7.5,
   )
@@ -1447,30 +1612,32 @@ if not mascara_activa.any():
   st.stop()
 
 temps_validas = grid_temp[mascara_activa]
-pct_calor = float(np.mean(temps_validas >= 27.0) * 100)
+d_ = VAR["dec"]
 if comparando:
   dif = cambio[mascara_activa]
-  etiquetas_kpi = [
-      "Cambio medio (B − A)", "Rango del cambio", "Territorio que subió > 0.5 °C",
-  ]
+  etiquetas_kpi = VAR["kpi_cambio"]
   kpi_vals = [
-      (etiquetas_kpi[0], f"{np.nanmean(dif):+.1f} °C"),
-      (etiquetas_kpi[1], f"{np.nanmin(dif):+.1f}° / {np.nanmax(dif):+.1f}°"),
-      (etiquetas_kpi[2], f"{np.mean(dif > 0.5) * 100:.0f}%"),
+      (etiquetas_kpi[0], f"{np.nanmean(dif):+.{d_}f} {UNIDAD}"),
+      (etiquetas_kpi[1], f"{np.nanmin(dif):+.{d_}f} / {np.nanmax(dif):+.{d_}f}"),
+      (etiquetas_kpi[2], f"{np.mean(VAR['cambio_alerta'](dif)) * 100:.0f}%"),
       ("Estaciones usadas", f"{n_est}"),
   ]
 else:
-  etiquetas_kpi = [
-      "Temperatura Media", "Rango Térmico (Mín / Máx)",
-      "Territorio en Calor Intenso (≥27°C)",
-  ]
+  etiquetas_kpi = VAR["kpi"]
+  if VAR["lapse"] or ini_s is not None:
+    pct_a = VAR["alerta"](
+        grid_temp[mascara_activa], grid_anom[mascara_activa]
+    )
+    pct_a = f"{np.mean(pct_a) * 100:.0f}%"
+  else:
+    pct_a = "—"  # sin fechas no hay periodo contra el cual medir el déficit
   kpi_vals = [
-      ("Temperatura media", f"{np.nanmean(temps_validas):.1f} °C"),
+      (VAR["kpi_corto"][0], f"{np.nanmean(temps_validas):.{d_}f} {UNIDAD}"),
       (
-          "Mín / Máx",
-          f"{np.nanmin(temps_validas):.1f}° / {np.nanmax(temps_validas):.1f}°",
+          VAR["kpi_corto"][1],
+          f"{np.nanmin(temps_validas):.{d_}f} / {np.nanmax(temps_validas):.{d_}f}",
       ),
-      ("Calor intenso (≥27 °C)", f"{pct_calor:.0f}%"),
+      (VAR["kpi_corto"][2], pct_a),
       ("Estaciones usadas", f"{n_est}"),
   ]
 
@@ -1487,9 +1654,9 @@ if stats is not None and i_mes:
   ts_act = meses_disponibles[i_mes].start_time
   ts_prev = meses_disponibles[i_mes - 1].start_time
   if ts_act in stats.index and ts_prev in stats.index:
-    dt = stats.loc[ts_act, "temp_media"] - stats.loc[ts_prev, "temp_media"]
-    dc = stats.loc[ts_act, "pct_calor"] - stats.loc[ts_prev, "pct_calor"]
-    delta_t = f"{dt:+.1f} °C vs. mes anterior"
+    dt = stats.loc[ts_act, "media"] - stats.loc[ts_prev, "media"]
+    dc = stats.loc[ts_act, "pct_alerta"] - stats.loc[ts_prev, "pct_alerta"]
+    delta_t = f"{dt:+.{VAR['dec']}f} {UNIDAD} vs. mes anterior"
     delta_c = f"{dc:+.0f} pts vs. mes anterior"
 
 with cont_kpi:
@@ -1567,7 +1734,7 @@ if reproducir and meses_disponibles is not None:
     if not m_.any():
       continue
     titulo_ph.markdown(
-        f"### {MESES_LARGO[p.month - 1]} {p.year} · {np.nanmean(t_[m_]):.1f} °C"
+        f"### {MESES_LARGO[p.month - 1]} {p.year} · {np.nanmean(t_[m_]):.{VAR['dec']}f} {UNIDAD}"
     )
     renderizar(
         mapa_ph, t_ if modo_mapa == MODO_TEMP else a_, m_, f"anim_{p}"
@@ -1589,13 +1756,16 @@ with cont_graf:
           " (parcial)" if stats.loc[ts, "parcial"] else ""
       )
 
-    mas_calido = stats["temp_media"].idxmax()
-    mas_extenso = stats["pct_calor"].idxmax()
+    idx_ext = (
+        stats["media"].idxmax() if VAR["extremo"] == "max"
+        else stats["media"].idxmin()
+    )
+    mas_extenso = stats["pct_alerta"].idxmax()
     st.caption(
-        f"Mes más cálido: **{nombre_mes(mas_calido)}**"
-        f" ({stats.loc[mas_calido, 'temp_media']:.1f} °C) · Mayor territorio"
-        f" ≥ 27 °C: **{nombre_mes(mas_extenso)}**"
-        f" ({stats.loc[mas_extenso, 'pct_calor']:.0f}%). Calculado sobre la"
+        f"{VAR['etq_extremo']}: **{nombre_mes(idx_ext)}**"
+        f" ({stats.loc[idx_ext, 'media']:.{VAR['dec']}f} {UNIDAD}) ·"
+        f" {VAR['etq_alerta']}: **{nombre_mes(mas_extenso)}**"
+        f" ({stats.loc[mas_extenso, 'pct_alerta']:.0f}%). Calculado sobre la"
         " región elegida, sin el filtro de piso térmico. Las barras rayadas"
         " son meses con datos incompletos."
     )
@@ -1606,10 +1776,22 @@ with cont_graf:
           if base["dem_real"]
           else "⚠️ SINTÉTICO (revisa tu conexión y usa el botón de recargar)."
       )
-      + " La temperatura se interpola con IDW sobre los residuos del gradiente"
-        " altitudinal; la anomalía compara cada periodo con el promedio del año"
-        " de la misma estación."
+      + (
+          " La temperatura se interpola con IDW sobre los residuos del"
+          " gradiente altitudinal."
+          if VAR["lapse"]
+          else " La lluvia se interpola con IDW (sin corrección por altitud) y"
+               " se expresa en mm/mes equivalentes (promedio diario × 30,4)."
+      )
+      + " La anomalía compara cada periodo con el promedio de los datos"
+        " cargados de la misma estación."
   )
+  if modo_mapa == MODO_ANOM and not comparando:
+    st.caption(
+        "⚠️ Esta anomalía usa como referencia los mismos datos cargados."
+        " Para medir el efecto de El Niño hace falta una referencia histórica"
+        " (varios años o la normal climatológica 1991–2020)."
+    )
 
 # ----------------------------------------------------------------------------
 # BARRA LATERAL: infografía y mantenimiento
@@ -1620,7 +1802,7 @@ if st.sidebar.button("Generar plancha PNG"):
     with st.spinner("Dibujando plancha cartográfica…"):
       png = generar_infografia(valores, mascara_activa, kpi_vals, None, n_est)
     nombre_png = (
-        f"plancha_temperatura_{_normalizar(etiqueta_periodo).replace(chr(40), chr(0)).replace(chr(41), chr(0)).replace(chr(0), chr(32)).strip().replace(chr(32), chr(45))}"
+        f"plancha_{_normalizar(variable)}_{_normalizar(etiqueta_periodo).replace(chr(40), chr(0)).replace(chr(41), chr(0)).replace(chr(0), chr(32)).strip().replace(chr(32), chr(45))}"
         f"_{_normalizar(region_sel.split(' (')[0])}.png"
     )
     st.session_state["infografia"] = (nombre_png, png)
