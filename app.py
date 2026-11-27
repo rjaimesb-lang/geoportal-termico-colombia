@@ -173,6 +173,15 @@ def _idx_grid(valor, vmin, vmax, n):
   )
 
 
+def es_parcial(p, f_min, f_max):
+  """True si el mes tiene datos incompletos (empieza tarde o termina antes)."""
+  margen = pd.Timedelta(days=2)
+  return bool(
+      (p.start_time <= f_min <= p.end_time and f_min > p.start_time + margen)
+      or (p.start_time <= f_max <= p.end_time and f_max < p.end_time - margen)
+  )
+
+
 def puntos_dentro(geojson, lon, lat):
   geom = shape(geojson)
   if geom.is_empty:
@@ -475,8 +484,8 @@ def construir_base(ruta_csv, mtime, resolucion):
 
 
 @st.cache_data(show_spinner="Interpolando temperatura del periodo…")
-def interpolar_periodo(ruta_csv, mtime, ini_s, fin_s, resolucion):
-  df = cargar_datos(ruta_csv, mtime)
+def interpolar_periodo(ruta_csv, mtime, ini_s, fin_s, resolucion, solo_estables):
+  df = datos(ruta_csv, mtime, solo_estables)
   base = construir_base(ruta_csv, mtime, resolucion)
   elev = base["elev"]
   n = elev.shape[0]
@@ -529,19 +538,60 @@ def interpolar_periodo(ruta_csv, mtime, ini_s, fin_s, resolucion):
 
 
 @st.cache_data
-def serie_mensual(ruta_csv, mtime):
-  df = cargar_datos(ruta_csv, mtime).dropna(subset=["fecha"]).copy()
-  if df.empty:
+def estaciones_estables(ruta_csv, mtime, umbral=0.8):
+  """Estaciones que reportan en al menos `umbral` de los meses del año."""
+  d = cargar_datos(ruta_csv, mtime).dropna(subset=["fecha"])
+  mes = d["fecha"].dt.to_period("M")
+  total = mes.nunique()
+  cuenta = d.assign(mes=mes).groupby(["latitud", "longitud"])["mes"].nunique()
+  return cuenta[cuenta >= umbral * total].reset_index()[["latitud", "longitud"]]
+
+
+def datos(ruta_csv, mtime, solo_estables):
+  d = cargar_datos(ruta_csv, mtime)
+  if solo_estables:
+    d = d.merge(
+        estaciones_estables(ruta_csv, mtime), on=["latitud", "longitud"]
+    )
+  return d
+
+
+@st.cache_data(show_spinner="Calculando la evolución mensual…")
+def estadisticas_mensuales(
+    ruta_csv, mtime, resolucion, region, suavizado_s, solo_estables
+):
+  """Temperatura media y % del territorio >= 27 °C por mes (área, no estaciones)."""
+  d = datos(ruta_csv, mtime, solo_estables).dropna(subset=["fecha"])
+  if d.empty:
     return None
-  df["mes"] = df["fecha"].dt.to_period("M")
-  s = (
-      df.groupby(["mes", "latitud", "longitud"])["temperatura"]
-      .mean()
-      .groupby("mes")
-      .mean()
-  )
-  s.index = s.index.to_timestamp()
-  return s
+  base = construir_base(ruta_csv, mtime, resolucion)
+  m = base["mascara_col"].copy()
+  if REGIONES_NATURALES[region] is not None:
+    m &= np.isin(base["deptos_grid"], REGIONES_NATURALES[region])
+  if not m.any():
+    return None
+  f_min, f_max = d["fecha"].min().normalize(), d["fecha"].max().normalize()
+  filas = []
+  for p in pd.period_range(f_min, f_max, freq="M"):
+    r = interpolar_periodo(
+        ruta_csv, mtime, str(p.start_time), str(p.end_time), resolucion,
+        solo_estables,
+    )
+    if r is None:
+      continue
+    t = gaussian_filter(r["temp"], suavizado_s) if suavizado_s > 0 else r["temp"]
+    filas.append(
+        dict(
+            mes=p.start_time,
+            temp_media=float(t[m].mean()),
+            pct_calor=float((t[m] >= 27.0).mean() * 100),
+            n_est=r["n_est"],
+            parcial=es_parcial(p, f_min, f_max),
+        )
+    )
+  if not filas:
+    return None
+  return pd.DataFrame(filas).set_index("mes")
 
 
 # ----------------------------------------------------------------------------
@@ -574,53 +624,109 @@ piso_termico = st.sidebar.selectbox(
     ],
 )
 
+# Contenedores: fijan el orden de la página. La línea de tiempo va justo
+# encima del mapa para usarla con el pulgar en el celular.
+cont_kpi = st.container()
+cont_ctl = st.container()
+cont_vista = st.container()
+cont_mapa = st.container()
+cont_graf = st.container()
+
 st.sidebar.header("📅 Periodo de análisis")
 ini_s, fin_s = None, None
 etiqueta_periodo = "Año completo"
 meses_disponibles = None
 reproducir = False
+modo_periodo = "Año completo"
+i_mes = None
+solo_estables = False
+comparando = False
+ini_a = fin_a = None
 
 if tiene_fecha:
   f_min = df["fecha"].min().normalize()
   f_max = df["fecha"].max().normalize()
   meses_disponibles = pd.period_range(f_min, f_max, freq="M")
 
-  modo_periodo = st.sidebar.radio(
-      "Ver:", ["Año completo", "Un mes", "Rango de fechas"]
+  solo_estables = st.sidebar.checkbox(
+      "Comparación justa entre meses",
+      value=False,
+      help=(
+          "Usa solo estaciones que reportan en al menos el 80% de los meses."
+          " Así los cambios reflejan el clima y no cuáles estaciones enviaron"
+          " datos cada mes."
+      ),
   )
-  if modo_periodo == "Un mes":
-    i_mes = st.sidebar.select_slider(
-        "Mes:",
-        options=list(range(len(meses_disponibles))),
-        value=len(meses_disponibles) - 1,
-        format_func=lambda i: (
-            f"{MESES[meses_disponibles[i].month - 1]} {meses_disponibles[i].year}"
-        ),
+
+  def etiqueta_mes(i, largo=False):
+    p = meses_disponibles[i]
+    nombre = MESES_LARGO[p.month - 1] if largo else MESES[p.month - 1]
+    parcial = " (parcial)" if es_parcial(p, f_min, f_max) else ""
+    return f"{nombre} {p.year}{parcial}"
+
+  with cont_ctl:
+    st.markdown("##### 📅 Línea de tiempo")
+    modo_periodo = st.radio(
+        "Periodo:",
+        ["Año completo", "Un mes", "Comparar dos meses", "Rango de fechas"],
+        horizontal=True,
+        label_visibility="collapsed",
     )
-    p = meses_disponibles[i_mes]
-    ini_s, fin_s = str(p.start_time), str(p.end_time)
-    etiqueta_periodo = f"{MESES_LARGO[p.month - 1]} {p.year}"
-  elif modo_periodo == "Rango de fechas":
-    rango = st.sidebar.date_input(
-        "Rango:",
-        value=(f_min.date(), f_max.date()),
-        min_value=f_min.date(),
-        max_value=f_max.date(),
-    )
-    if isinstance(rango, (tuple, list)) and len(rango) == 2:
-      d1, d2 = pd.Timestamp(rango[0]), pd.Timestamp(rango[1])
-      ini_s = str(d1)
-      fin_s = str(d2 + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
-      etiqueta_periodo = f"{d1:%d/%m/%Y} – {d2:%d/%m/%Y}"
-    else:
-      st.sidebar.info("Selecciona la fecha final del rango.")
-      st.stop()
-  reproducir = st.sidebar.button("▶ Reproducir mes a mes")
+    if modo_periodo == "Un mes":
+      i_mes = st.select_slider(
+          "Mes:",
+          options=list(range(len(meses_disponibles))),
+          value=len(meses_disponibles) - 1,
+          format_func=etiqueta_mes,
+          label_visibility="collapsed",
+      )
+      p = meses_disponibles[i_mes]
+      ini_s, fin_s = str(p.start_time), str(p.end_time)
+      etiqueta_periodo = etiqueta_mes(i_mes, largo=True)
+      reproducir = st.button("▶ Reproducir el año")
+    elif modo_periodo == "Comparar dos meses":
+      n_m = len(meses_disponibles)
+      i_a = st.select_slider(
+          "Mes base (A):", options=list(range(n_m)),
+          value=max(n_m - 2, 0), format_func=etiqueta_mes,
+      )
+      i_b = st.select_slider(
+          "Mes a comparar (B):", options=list(range(n_m)),
+          value=n_m - 1, format_func=etiqueta_mes,
+      )
+      pa, pb = meses_disponibles[i_a], meses_disponibles[i_b]
+      ini_a, fin_a = str(pa.start_time), str(pa.end_time)
+      ini_s, fin_s = str(pb.start_time), str(pb.end_time)
+      etiqueta_periodo = (
+          f"{etiqueta_mes(i_a, largo=True)} → {etiqueta_mes(i_b, largo=True)}"
+      )
+      comparando = True
+      if i_a == i_b:
+        st.caption("Elige dos meses distintos para ver diferencias.")
+    elif modo_periodo == "Rango de fechas":
+      rango = st.date_input(
+          "Rango:",
+          value=(f_min.date(), f_max.date()),
+          min_value=f_min.date(),
+          max_value=f_max.date(),
+      )
+      if isinstance(rango, (tuple, list)) and len(rango) == 2:
+        d1, d2 = pd.Timestamp(rango[0]), pd.Timestamp(rango[1])
+        ini_s = str(d1)
+        fin_s = str(d2 + pd.Timedelta(days=1) - pd.Timedelta(seconds=1))
+        etiqueta_periodo = f"{d1:%d/%m/%Y} – {d2:%d/%m/%Y}"
+      else:
+        st.info("Selecciona la fecha final del rango.")
+        st.stop()
 else:
   st.sidebar.warning(
       "Tu CSV no tiene una columna de fecha reconocible (`fecha` o"
       " `FechaObservacion`), mostrando promedio general."
   )
+
+if comparando:
+  modo_mapa = MODO_ANOM
+  st.sidebar.caption("Comparando meses: el mapa muestra el cambio B − A.")
 
 st.sidebar.header("🎛️ Controles del mapa")
 exag = st.sidebar.slider("Exageración vertical / sombreado (×):", 2, 30, 12, step=1)
@@ -648,7 +754,7 @@ if modo_mapa == MODO_ANOM and not tiene_fecha:
 
 
 def calcular(ini, fin):
-  r = interpolar_periodo(RUTA_CSV, mtime, ini, fin, RESOLUCION)
+  r = interpolar_periodo(RUTA_CSV, mtime, ini, fin, RESOLUCION, solo_estables)
   if r is None:
     return None
   t_out = gaussian_filter(r["temp"], suavizado) if suavizado > 0 else r["temp"]
@@ -686,7 +792,10 @@ def escala_actual():
     else:
       escala = ESCALA_TEMP
     return escala, T_MIN, T_MAX, "Temp (°C)"
-  return ESCALA_ANOM, -ANOM_LIM, ANOM_LIM, "Anomalía (°C)"
+  return (
+      ESCALA_ANOM, -ANOM_LIM, ANOM_LIM,
+      "Cambio (°C)" if comparando else "Anomalía (°C)",
+  )
 
 
 def lineas_lonlat():
@@ -972,11 +1081,25 @@ def construir_mapa_movil(valores, mascara_activa):
   return fig
 
 
-def grafico_serie(serie, ini, fin):
-  fig = go.Figure(
+def grafico_evolucion(stats, ini, fin):
+  patron = ["/" if p else "" for p in stats["parcial"]]
+  fig = go.Figure()
+  fig.add_trace(
+      go.Bar(
+          x=stats.index, y=stats["pct_calor"], yaxis="y2",
+          name="% del territorio ≥ 27 °C",
+          marker=dict(
+              color="rgba(239,68,68,0.55)",
+              pattern=dict(shape=patron, fgcolor="rgba(255,255,255,0.6)"),
+          ),
+          hovertemplate="%{x|%b %Y}: %{y:.0f}% del territorio ≥ 27 °C<extra></extra>",
+      )
+  )
+  fig.add_trace(
       go.Scatter(
-          x=serie.index, y=serie.values, mode="lines+markers",
-          line=dict(color="#fb923c", width=3), marker=dict(size=7),
+          x=stats.index, y=stats["temp_media"], name="Temperatura media",
+          mode="lines+markers", line=dict(color="#fb923c", width=3),
+          marker=dict(size=7),
           hovertemplate="%{x|%b %Y}: %{y:.1f} °C<extra></extra>",
       )
   )
@@ -987,15 +1110,14 @@ def grafico_serie(serie, ini, fin):
         fillcolor="#38bdf8", opacity=0.25, line_width=0,
     )
   fig.update_layout(
-      height=240, margin=dict(l=10, r=10, t=40, b=10),
+      height=300, margin=dict(l=10, r=10, t=50, b=10),
       paper_bgcolor=BG, plot_bgcolor=BG, font=dict(color="#cbd5e1"),
-      title=dict(
-          text="Evolución mensual de la temperatura media"
-               " (promedio de estaciones)",
-          font=dict(size=14),
-      ),
+      title=dict(text="Evolución mensual en el territorio", font=dict(size=14)),
+      legend=dict(orientation="h", y=1.18, x=0),
       xaxis=dict(gridcolor="#1f2937"),
       yaxis=dict(gridcolor="#1f2937", ticksuffix=" °C"),
+      yaxis2=dict(overlaying="y", side="right", range=[0, 100],
+                  ticksuffix="%", showgrid=False),
   )
   return fig
 
@@ -1047,7 +1169,11 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   else:
     cmap = LinearSegmentedColormap.from_list("a", [tuple(p) for p in ESCALA_ANOM])
     norm = Normalize(-ANOM_LIM, ANOM_LIM)
-    titulo_mapa = "ANOMALÍA DE\nTEMPERATURA\nDEL AIRE (°C)"
+    titulo_mapa = (
+        "CAMBIO DE\nTEMPERATURA\nDEL AIRE (°C)"
+        if comparando
+        else "ANOMALÍA DE\nTEMPERATURA\nDEL AIRE (°C)"
+    )
 
   rgb = np.zeros(elev.shape + (3,))
   rgb[:] = to_rgb("#cce3f5")
@@ -1215,7 +1341,7 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
   )
 
   ax_caj.text(
-      0.39, 0.90, "Leyenda (°C)" if modo_mapa == MODO_TEMP else "Anomalía (°C)",
+      0.39, 0.90, "Leyenda (°C)" if modo_mapa == MODO_TEMP else ("Cambio (°C)" if comparando else "Anomalía (°C)"),
       fontsize=8.5, fontweight="bold", ha="center", color="#0f172a",
   )
   if modo_mapa == MODO_TEMP:
@@ -1271,9 +1397,9 @@ def generar_infografia(valores, mascara_activa, kpis, serie, n_est):
       f"PROYECCIÓN: Geográfica (WGS84)\n"
       f"DATUM: MAGNA-SIRGAS\n"
       f"ESTACIONES IDEAM: {n_est} activas\n"
-      f"TEMP. MEDIA ÁREA: {kpis[0][1]}\n"
-      f"RANGO (MÍN / MÁX): {kpis[1][1]}\n"
-      f"CALOR INTENSO (≥27°C): {kpis[2][1]}\n"
+      f"{kpis[0][0].upper()}: {kpis[0][1]}\n"
+      f"{kpis[1][0].upper()}: {kpis[1][1]}\n"
+      f"{kpis[2][0].upper()}: {kpis[2][1]}\n"
       f"MÉTODO: IDW + Gradiente Altitudinal"
   )
   ax_caj.text(
@@ -1302,7 +1428,16 @@ if res is None:
   st.warning("No hay estaciones con datos en ese periodo. Prueba otro rango.")
   st.stop()
 grid_temp, grid_anom, n_est = res
-valores = grid_temp if modo_mapa == MODO_TEMP else grid_anom
+cambio = None
+if comparando:
+  res_a = calcular(ini_a, fin_a)
+  if res_a is None:
+    st.warning("No hay estaciones con datos en el mes base (A).")
+    st.stop()
+  cambio = grid_temp - res_a[0]
+  valores = cambio
+else:
+  valores = grid_temp if modo_mapa == MODO_TEMP else grid_anom
 mascara_activa = mascara_filtrada(grid_temp)
 
 if not mascara_activa.any():
@@ -1313,54 +1448,92 @@ if not mascara_activa.any():
 
 temps_validas = grid_temp[mascara_activa]
 pct_calor = float(np.mean(temps_validas >= 27.0) * 100)
-kpi_vals = [
-    ("Temperatura media", f"{np.nanmean(temps_validas):.1f} °C"),
-    (
-        "Mín / Máx",
-        f"{np.nanmin(temps_validas):.1f}° / {np.nanmax(temps_validas):.1f}°",
-    ),
-    ("Calor intenso (≥27 °C)", f"{pct_calor:.0f}%"),
-    ("Estaciones usadas", f"{n_est}"),
-]
+if comparando:
+  dif = cambio[mascara_activa]
+  etiquetas_kpi = [
+      "Cambio medio (B − A)", "Rango del cambio", "Territorio que subió > 0.5 °C",
+  ]
+  kpi_vals = [
+      (etiquetas_kpi[0], f"{np.nanmean(dif):+.1f} °C"),
+      (etiquetas_kpi[1], f"{np.nanmin(dif):+.1f}° / {np.nanmax(dif):+.1f}°"),
+      (etiquetas_kpi[2], f"{np.mean(dif > 0.5) * 100:.0f}%"),
+      ("Estaciones usadas", f"{n_est}"),
+  ]
+else:
+  etiquetas_kpi = [
+      "Temperatura Media", "Rango Térmico (Mín / Máx)",
+      "Territorio en Calor Intenso (≥27°C)",
+  ]
+  kpi_vals = [
+      ("Temperatura media", f"{np.nanmean(temps_validas):.1f} °C"),
+      (
+          "Mín / Máx",
+          f"{np.nanmin(temps_validas):.1f}° / {np.nanmax(temps_validas):.1f}°",
+      ),
+      ("Calor intenso (≥27 °C)", f"{pct_calor:.0f}%"),
+      ("Estaciones usadas", f"{n_est}"),
+  ]
 
-k1, k2, k3, k4 = st.columns(4)
-k1.metric("Periodo · Área", f"{etiqueta_periodo} · {region_sel.split(' (')[0]}")
-k2.metric("Temperatura Media", kpi_vals[0][1])
-k3.metric("Rango Térmico (Mín / Máx)", kpi_vals[1][1])
-k4.metric("Territorio en Calor Intenso (≥27°C)", kpi_vals[2][1])
+stats = (
+    estadisticas_mensuales(
+        RUTA_CSV, mtime, RESOLUCION, region_sel, float(suavizado), solo_estables
+    )
+    if tiene_fecha
+    else None
+)
+
+delta_t = delta_c = None
+if stats is not None and i_mes:
+  ts_act = meses_disponibles[i_mes].start_time
+  ts_prev = meses_disponibles[i_mes - 1].start_time
+  if ts_act in stats.index and ts_prev in stats.index:
+    dt = stats.loc[ts_act, "temp_media"] - stats.loc[ts_prev, "temp_media"]
+    dc = stats.loc[ts_act, "pct_calor"] - stats.loc[ts_prev, "pct_calor"]
+    delta_t = f"{dt:+.1f} °C vs. mes anterior"
+    delta_c = f"{dc:+.0f} pts vs. mes anterior"
+
+with cont_kpi:
+  k1, k2, k3, k4 = st.columns(4)
+  k1.metric("Periodo · Área", f"{etiqueta_periodo} · {region_sel.split(' (')[0]}")
+  k2.metric(etiquetas_kpi[0], kpi_vals[0][1], delta=delta_t, delta_color="off")
+  k3.metric(etiquetas_kpi[1], kpi_vals[1][1])
+  k4.metric(
+      etiquetas_kpi[2], kpi_vals[2][1],
+      delta=delta_c, delta_color="off",
+  )
 
 # --- Tipo de vista y controles de navegación ---
-vista = st.radio("Vista:", [VISTA_MAPA, VISTA_3D], horizontal=True)
-
 modo_tactil = "Rotar mapa (Tornamesa)"
 vista_rapida = "Inclinada (3D)"
 zoom_nivel = 1.0
 congelar_mapa = False
 
-if vista == VISTA_3D:
-  c_nav1, c_nav2, c_nav3 = st.columns([2, 1, 1])
-  with c_nav1:
-    modo_tactil = st.radio(
-        "Control táctil / mouse:",
-        [
-            "Rotar mapa (Tornamesa)",
-            "Mover / Desplazar",
-            "Bloquear mapa (bajar página)",
-        ],
-        horizontal=True,
+with cont_vista:
+  vista = st.radio("Vista:", [VISTA_MAPA, VISTA_3D], horizontal=True)
+  if vista == VISTA_3D:
+    c_nav1, c_nav2, c_nav3 = st.columns([2, 1, 1])
+    with c_nav1:
+      modo_tactil = st.radio(
+          "Control táctil / mouse:",
+          [
+              "Rotar mapa (Tornamesa)",
+              "Mover / Desplazar",
+              "Bloquear mapa (bajar página)",
+          ],
+          horizontal=True,
+      )
+    with c_nav2:
+      vista_rapida = st.selectbox("Enfoque rápido:", list(CAMARAS.keys()))
+    with c_nav3:
+      zoom_nivel = st.slider("Zoom:", 0.4, 2.2, 1.0, step=0.1)
+  else:
+    st.caption(
+        "Pellizca con dos dedos para acercar, arrastra con uno para moverte"
+        " y toca el mapa para ver temperatura y altitud."
     )
-  with c_nav2:
-    vista_rapida = st.selectbox("Enfoque rápido:", list(CAMARAS.keys()))
-  with c_nav3:
-    zoom_nivel = st.slider("Zoom:", 0.4, 2.2, 1.0, step=0.1)
-else:
-  st.caption(
-      "Pellizca con dos dedos para acercar, arrastra con uno para moverte"
-      " y toca el mapa para ver temperatura y altitud."
-  )
-  congelar_mapa = st.checkbox(
-      "🔒 Congelar mapa (para bajar la página con el dedo)", value=False
-  )
+    congelar_mapa = st.checkbox(
+        "🔒 Congelar mapa (para bajar la página con el dedo)", value=False
+    )
 
 
 def renderizar(destino, vals, mask, key):
@@ -1380,8 +1553,9 @@ def renderizar(destino, vals, mask, key):
   destino.plotly_chart(fig, use_container_width=True, key=k, config=cfg)
 
 
-titulo_ph = st.empty()
-mapa_ph = st.empty()
+with cont_mapa:
+  titulo_ph = st.empty()
+  mapa_ph = st.empty()
 
 if reproducir and meses_disponibles is not None:
   for p in meses_disponibles:
@@ -1398,26 +1572,44 @@ if reproducir and meses_disponibles is not None:
     renderizar(
         mapa_ph, t_ if modo_mapa == MODO_TEMP else a_, m_, f"anim_{p}"
     )
-    time.sleep(0.7)
+    time.sleep(0.8)
   titulo_ph.empty()
 
 renderizar(mapa_ph, valores, mascara_activa, "principal")
 
-serie = serie_mensual(RUTA_CSV, mtime) if tiene_fecha else None
-if serie is not None and len(serie) >= 2:
-  st.plotly_chart(grafico_serie(serie, ini_s, fin_s), use_container_width=True)
-
-st.caption(
-    "Relieve: "
-    + (
-        "modelo de elevación real (AWS Terrain Tiles / SRTM)."
-        if base["dem_real"]
-        else "⚠️ SINTÉTICO (revisa tu conexión y usa el botón de recargar)."
+with cont_graf:
+  if stats is not None and len(stats) >= 2:
+    st.plotly_chart(
+        grafico_evolucion(stats, ini_s, fin_s),
+        use_container_width=True, key="evolucion",
     )
-    + " La temperatura se interpola con IDW sobre los residuos del gradiente"
-      " altitudinal; la anomalía compara cada periodo con el promedio del año"
-      " de la misma estación."
-)
+
+    def nombre_mes(ts):
+      return MESES_LARGO[ts.month - 1] + (
+          " (parcial)" if stats.loc[ts, "parcial"] else ""
+      )
+
+    mas_calido = stats["temp_media"].idxmax()
+    mas_extenso = stats["pct_calor"].idxmax()
+    st.caption(
+        f"Mes más cálido: **{nombre_mes(mas_calido)}**"
+        f" ({stats.loc[mas_calido, 'temp_media']:.1f} °C) · Mayor territorio"
+        f" ≥ 27 °C: **{nombre_mes(mas_extenso)}**"
+        f" ({stats.loc[mas_extenso, 'pct_calor']:.0f}%). Calculado sobre la"
+        " región elegida, sin el filtro de piso térmico. Las barras rayadas"
+        " son meses con datos incompletos."
+    )
+  st.caption(
+      "Relieve: "
+      + (
+          "modelo de elevación real (AWS Terrain Tiles / SRTM)."
+          if base["dem_real"]
+          else "⚠️ SINTÉTICO (revisa tu conexión y usa el botón de recargar)."
+      )
+      + " La temperatura se interpola con IDW sobre los residuos del gradiente"
+        " altitudinal; la anomalía compara cada periodo con el promedio del año"
+        " de la misma estación."
+  )
 
 # ----------------------------------------------------------------------------
 # BARRA LATERAL: infografía y mantenimiento
@@ -1426,9 +1618,9 @@ st.sidebar.header("🖼️ Plancha Cartográfica")
 if st.sidebar.button("Generar plancha PNG"):
   try:
     with st.spinner("Dibujando plancha cartográfica…"):
-      png = generar_infografia(valores, mascara_activa, kpi_vals, serie, n_est)
+      png = generar_infografia(valores, mascara_activa, kpi_vals, None, n_est)
     nombre_png = (
-        f"plancha_temperatura_{_normalizar(etiqueta_periodo)}"
+        f"plancha_temperatura_{_normalizar(etiqueta_periodo).replace(chr(40), chr(0)).replace(chr(41), chr(0)).replace(chr(0), chr(32)).strip().replace(chr(32), chr(45))}"
         f"_{_normalizar(region_sel.split(' (')[0])}.png"
     )
     st.session_state["infografia"] = (nombre_png, png)
